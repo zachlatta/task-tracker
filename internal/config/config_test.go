@@ -6,6 +6,28 @@ import (
 	"testing"
 )
 
+func TestLoadDefaultsToHostedPublicURL(t *testing.T) {
+	previous, existed := os.LookupEnv("TASK_TRACKER_PUBLIC_URL")
+	if err := os.Unsetenv("TASK_TRACKER_PUBLIC_URL"); err != nil {
+		t.Fatalf("unset TASK_TRACKER_PUBLIC_URL: %v", err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv("TASK_TRACKER_PUBLIC_URL", previous)
+		} else {
+			_ = os.Unsetenv("TASK_TRACKER_PUBLIC_URL")
+		}
+	})
+
+	loaded, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.PublicURL != "https://task-tracker.zachlatta.com" {
+		t.Fatalf("PublicURL = %q, want hosted URL", loaded.PublicURL)
+	}
+}
+
 func TestLoadUsesEnvironmentBeforeDotEnv(t *testing.T) {
 	directory := t.TempDir()
 	dotenv := filepath.Join(directory, ".env")

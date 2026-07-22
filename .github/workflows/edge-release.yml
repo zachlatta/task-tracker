@@ -45,3 +45,20 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Edge ${GITHUB_SHA::7}" \
             --notes "Automated build of commit $GITHUB_SHA. This rolling prerelease is replaced by every commit to main."
+      - name: Update Homebrew formula
+        run: |
+          version="$(jq -r .version dist/metadata.json)"
+          go run ./cmd/update-homebrew-formula \
+            zachlatta/task-tracker \
+            "0.0.0.$GITHUB_RUN_NUMBER" \
+            "$version" \
+            dist/checksums.txt \
+            Formula/task-tracker.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/task-tracker.rb
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Update Homebrew formula for ${GITHUB_SHA::7} [skip ci]"
+          git push origin HEAD:main

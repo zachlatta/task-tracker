@@ -45,19 +45,3 @@ changelog:
 
 release:
   prerelease: auto
-
-homebrew_casks:
-  - name: task-tracker
-    binaries:
-      - task-tracker
-    homepage: https://github.com/zachlatta/task-tracker
-    description: PostgreSQL-backed task tracker with CLI, web, and MCP interfaces
-    repository:
-      owner: zachlatta
-      name: task-tracker
-      branch: main
-      token: '{{ .Env.GITHUB_TOKEN }}'
-    directory: Casks
-    commit_author:
-      name: github-actions[bot]
-      email: 41898282+github-actions[bot]@users.noreply.github.com

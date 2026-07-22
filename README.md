@@ -84,7 +84,7 @@ The process reads `.env` when it starts. Existing environment variables take pre
 | `TASK_TRACKER_SECRET` | required for `serve` | Shared secret used by web login and OAuth authorization |
 | `TASK_TRACKER_DATABASE_URL` | required for all commands | PostgreSQL connection string for task storage |
 | `TASK_TRACKER_ADDR` | `127.0.0.1:8080` | HTTP listen address |
-| `TASK_TRACKER_PUBLIC_URL` | derived from listen address | Public OAuth issuer origin; HTTPS required off loopback |
+| `TASK_TRACKER_PUBLIC_URL` | `https://task-tracker.zachlatta.com` | Public OAuth issuer origin; HTTPS required off loopback |
 | `TASK_TRACKER_DATA_DIR` | OS user config directory | Default parent directory for local image storage |
 | `TASK_TRACKER_OBJECT_STORE` | `local` | `local` or `s3` |
 | `TASK_TRACKER_LOCAL_OBJECT_DIR` | `<data-dir>/images` | Local development image storage |
@@ -117,14 +117,16 @@ Tests cover the domain service, PostgreSQL persistence, read-only SQL enforcemen
 
 ## Releases and Homebrew
 
-Every commit pushed to `main` runs the full test suite and replaces the rolling `edge` GitHub prerelease with cross-platform archives for that commit. Tags matching `v*` create immutable stable releases through GoReleaser.
+Every source commit pushed to `main` runs the full test suite and replaces the rolling `edge` GitHub prerelease with cross-platform archives for that commit. The edge workflow also updates the checksummed formula in this repository, so the tap follows `main`. Tags matching `v*` create immutable stable releases through GoReleaser.
 
-Stable tagged releases also publish a Homebrew cask into this repository. After the first tagged release:
+Install the latest `main` build through the repository's Homebrew tap:
 
 ```sh
 brew tap zachlatta/task-tracker https://github.com/zachlatta/task-tracker
-brew install --cask task-tracker
+brew install task-tracker
 ```
+
+After later commits reach `main`, update it with `brew update && brew upgrade task-tracker`.
 
 The release workflows use only the repository-scoped `GITHUB_TOKEN`; no package or object-storage credentials are embedded in builds.
 

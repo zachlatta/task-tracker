@@ -61,17 +61,13 @@ func Load(dotenvPath string) (Config, error) {
 		dataDirectory = filepath.Join(configDirectory, "task-tracker")
 	}
 	address := get("TASK_TRACKER_ADDR", "127.0.0.1:8080")
-	publicAddress := address
-	if strings.HasPrefix(publicAddress, ":") {
-		publicAddress = "127.0.0.1" + publicAddress
-	}
 	useSSL, err := strconv.ParseBool(get("TASK_TRACKER_S3_USE_SSL", "true"))
 	if err != nil {
 		return Config{}, fmt.Errorf("TASK_TRACKER_S3_USE_SSL: %w", err)
 	}
 	return Config{
 		Address:        address,
-		PublicURL:      strings.TrimRight(get("TASK_TRACKER_PUBLIC_URL", "http://"+publicAddress), "/"),
+		PublicURL:      strings.TrimRight(get("TASK_TRACKER_PUBLIC_URL", "https://task-tracker.zachlatta.com"), "/"),
 		Secret:         get("TASK_TRACKER_SECRET", ""),
 		DatabaseURL:    get("TASK_TRACKER_DATABASE_URL", ""),
 		DataDir:        dataDirectory,
