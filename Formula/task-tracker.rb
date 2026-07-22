@@ -7,25 +7,25 @@
 class TaskTracker < Formula
   desc "PostgreSQL-backed task tracker with CLI, web, and MCP interfaces"
   homepage "https://github.com/zachlatta/task-tracker"
-  version "0.0.0.6"
+  version "0.0.0.7"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-d9fa57e_darwin_arm64.tar.gz"
-      sha256 "71c230929e586f1935dd3be47d8b8f3f929b5e685c3563947356e072925f952a"
+      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-514c968_darwin_arm64.tar.gz"
+      sha256 "baa9fd1be22419ec182a076c840812944c1555e67ceac5987fccbae24159f918"
     else
-      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-d9fa57e_darwin_amd64.tar.gz"
-      sha256 "270efff185ca9c6a992ed82e0792ff6591790bfcef72f03e15ca1b9930437892"
+      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-514c968_darwin_amd64.tar.gz"
+      sha256 "c631f6eb9d400421b1caf5b5e5eb35c0fee4faeea24feed89863b5b55d90aef5"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-d9fa57e_linux_arm64.tar.gz"
-      sha256 "5af58ae9cebe7a1967a28d2bc929adb6d35c873f2789b9d0f81f188a1acffcf2"
+      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-514c968_linux_arm64.tar.gz"
+      sha256 "372c0c012708babc50f4ed46d942aa9c41b04c102fc8a07343f3729a3cfa465b"
     else
-      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-d9fa57e_linux_amd64.tar.gz"
-      sha256 "9fbffa4bbe477918d6471a63b80d6682ef72ed661c2157e9a8242f5f03ad9d3f"
+      url "https://github.com/zachlatta/task-tracker/releases/download/edge/task-tracker_edge-SNAPSHOT-514c968_linux_amd64.tar.gz"
+      sha256 "481fdd5e17f81fb5c3b0dce514cf34e3dec238166753761aa3bf810da0b3ef3b"
     end
   end
 
@@ -34,6 +34,6 @@ class TaskTracker < Formula
   end
 
   test do
-    assert_equal "edge-SNAPSHOT-d9fa57e\n", shell_output("#{bin}/task-tracker version")
+    assert_equal "edge-SNAPSHOT-514c968\n", shell_output("#{bin}/task-tracker version")
   end
 end
