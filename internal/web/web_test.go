@@ -50,6 +50,10 @@ func TestLoginProtectsTaskPage(t *testing.T) {
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), created.Title) {
 		t.Fatalf("task page status = %d; body: %s", page.Code, page.Body.String())
 	}
+	// The page must describe the real storage backend, not the pre-migration one.
+	if body := page.Body.String(); !strings.Contains(body, "POSTGRES-BACKED") || strings.Contains(body, "MARKDOWN-BACKED") {
+		t.Fatalf("index page storage label is stale; body: %s", body)
+	}
 }
 
 func TestCreateCompleteAndUploadImage(t *testing.T) {

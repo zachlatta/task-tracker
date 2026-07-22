@@ -51,7 +51,7 @@ homebrew_casks:
     binaries:
       - task-tracker
     homepage: https://github.com/zachlatta/task-tracker
-    description: Markdown-backed task tracker with CLI, web, and MCP interfaces
+    description: PostgreSQL-backed task tracker with CLI, web, and MCP interfaces
     repository:
       owner: zachlatta
       name: task-tracker
