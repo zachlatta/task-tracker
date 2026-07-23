@@ -7,25 +7,25 @@
 class Tasks < Formula
   desc "PostgreSQL-backed task management with CLI, web, and MCP interfaces"
   homepage "https://github.com/zachlatta/tasks"
-  version "0.0.0.9"
+  version "0.0.0.10"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-f65d10a_darwin_arm64.tar.gz"
-      sha256 "c882f73e939ae42bbbd1dcde37632f431a3e226e1ec6b25d4a75e724d9145ba7"
+      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-bb7e811_darwin_arm64.tar.gz"
+      sha256 "cc649eb105f4041553c44a89ffe042720799a934a02f28636d3d3859985b4fad"
     else
-      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-f65d10a_darwin_amd64.tar.gz"
-      sha256 "fa8ac7d94dde11b739600e53459681f8ec1d8ed9ebffe218df868535f20d93b5"
+      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-bb7e811_darwin_amd64.tar.gz"
+      sha256 "0b57837bf2477798f2a0d194db78de21774afc7fe8e80a1840e18a646924e139"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-f65d10a_linux_arm64.tar.gz"
-      sha256 "15de4e4ce7cf6a1164b2037d2fb7ecc03ed1d514ca9c00945138a0c176b5a846"
+      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-bb7e811_linux_arm64.tar.gz"
+      sha256 "fee2b42944fc52b2bcfe585f3e414e14f3a25bfd6aecfceb1ba5ebab7162930a"
     else
-      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-f65d10a_linux_amd64.tar.gz"
-      sha256 "0d571fc740f36a27fa1bc46d53afd7c63c8bd9f6c1bea2ab6da6292bd566bbc4"
+      url "https://github.com/zachlatta/tasks/releases/download/edge/tasks_edge-SNAPSHOT-bb7e811_linux_amd64.tar.gz"
+      sha256 "0c4aaacb02c4e475659bd18e5160befb774343865a3aed8dcd4482d8ae540398"
     end
   end
 
@@ -34,6 +34,6 @@ class Tasks < Formula
   end
 
   test do
-    assert_equal "edge-SNAPSHOT-f65d10a\n", shell_output("#{bin}/tasks version")
+    assert_equal "edge-SNAPSHOT-bb7e811\n", shell_output("#{bin}/tasks version")
   end
 end
