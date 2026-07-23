@@ -99,6 +99,99 @@ func TestOAuthAuthorizationCodeFlow(t *testing.T) {
 	}
 }
 
+func TestAuthorizeAcceptsAnyResourceIndicator(t *testing.T) {
+	t.Parallel()
+
+	// Clients vary in how they send the RFC 8707 resource indicator: some omit
+	// it entirely (as Claude's connector does), others send a slightly different
+	// form. The server hosts a single MCP resource, so every one of these must
+	// connect and receive a token bound to this server.
+	for _, resource := range []string{"", "https://tasks.example.com", "https://tasks.example.com/mcp"} {
+		resource := resource
+		name := resource
+		if name == "" {
+			name = "omitted"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			server := NewServer(Config{
+				Issuer: "https://tasks.example.com",
+				Secret: "correct horse battery staple",
+			})
+			mux := http.NewServeMux()
+			server.RegisterRoutes(mux)
+			clientID := registerClient(t, mux, "https://claude.ai/api/mcp/auth_callback")
+
+			verifier := "0123456789012345678901234567890123456789012"
+			sum := sha256.Sum256([]byte(verifier))
+			challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+			form := url.Values{
+				"client_id":             {clientID},
+				"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
+				"response_type":         {"code"},
+				"code_challenge":        {challenge},
+				"code_challenge_method": {"S256"},
+				"state":                 {"state-123"},
+				"secret":                {"correct horse battery staple"},
+			}
+			if resource != "" {
+				form.Set("resource", resource)
+			}
+
+			pageRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+form.Encode(), nil)
+			pageResponse := httptest.NewRecorder()
+			mux.ServeHTTP(pageResponse, pageRequest)
+			if pageResponse.Code != http.StatusOK {
+				t.Fatalf("authorize page status = %d, want %d; body: %s", pageResponse.Code, http.StatusOK, pageResponse.Body.String())
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, req)
+			if response.Code != http.StatusFound {
+				t.Fatalf("authorize status = %d, want %d; body: %s", response.Code, http.StatusFound, response.Body.String())
+			}
+			redirect, err := url.Parse(response.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("parse redirect: %v", err)
+			}
+			code := redirect.Query().Get("code")
+			if code == "" {
+				t.Fatalf("redirect query = %q, want a code", redirect.RawQuery)
+			}
+
+			tokenForm := url.Values{
+				"grant_type":    {"authorization_code"},
+				"client_id":     {clientID},
+				"redirect_uri":  {"https://claude.ai/api/mcp/auth_callback"},
+				"code":          {code},
+				"code_verifier": {verifier},
+			}
+			if resource != "" {
+				tokenForm.Set("resource", resource)
+			}
+			tokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
+			tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			tokenResponse := httptest.NewRecorder()
+			mux.ServeHTTP(tokenResponse, tokenRequest)
+			if tokenResponse.Code != http.StatusOK {
+				t.Fatalf("token status = %d, want %d; body: %s", tokenResponse.Code, http.StatusOK, tokenResponse.Body.String())
+			}
+			var tokenBody struct {
+				AccessToken string `json:"access_token"`
+			}
+			if err := json.Unmarshal(tokenResponse.Body.Bytes(), &tokenBody); err != nil {
+				t.Fatalf("decode token response: %v", err)
+			}
+			if !server.ValidToken(context.Background(), tokenBody.AccessToken) {
+				t.Fatal("issued token is not valid")
+			}
+		})
+	}
+}
+
 func TestRegisterAcceptsRefreshTokenGrant(t *testing.T) {
 	t.Parallel()
 

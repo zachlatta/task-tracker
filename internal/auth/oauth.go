@@ -309,9 +309,12 @@ func (s *Server) parseAuthorizationRequest(ctx context.Context, values url.Value
 	if values.Get("code_challenge_method") != "S256" || len(request.Challenge) < 43 || len(request.Challenge) > 128 {
 		return authorizationRequest{}, errors.New("S256 PKCE is required")
 	}
-	if request.Resource != s.resource {
-		return authorizationRequest{}, errors.New("resource does not identify this MCP server")
-	}
+	// This server hosts a single MCP resource, so bind every token to it
+	// regardless of the RFC 8707 resource indicator the client supplied. Clients
+	// vary: some omit the parameter (Claude's connector does), others send a
+	// slightly different form. Accepting them all lets any MCP client connect
+	// while the issued token's audience stays pinned to this server.
+	request.Resource = s.resource
 	registered, ok, err := s.store.Client(ctx, request.ClientID)
 	if err != nil {
 		return authorizationRequest{}, errors.New("could not look up client")
@@ -346,7 +349,10 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not read authorization code")
 		return
 	}
-	if !ok || !s.now().Before(code.ExpiresAt) || code.ClientID != r.PostForm.Get("client_id") || code.RedirectURI != r.PostForm.Get("redirect_uri") || code.Resource != r.PostForm.Get("resource") {
+	// The code's resource was normalized to this server at authorization time, so
+	// the token request's resource indicator (which clients send inconsistently)
+	// is not re-checked here; the token stays bound to code.Resource below.
+	if !ok || !s.now().Before(code.ExpiresAt) || code.ClientID != r.PostForm.Get("client_id") || code.RedirectURI != r.PostForm.Get("redirect_uri") {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid or expired")
 		return
 	}
