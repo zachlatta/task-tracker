@@ -90,6 +90,13 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 	scope TEXT NOT NULL,
 	expires_at TIMESTAMPTZ NOT NULL
 );
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+	token_hash TEXT PRIMARY KEY,
+	client_id TEXT NOT NULL,
+	resource TEXT NOT NULL,
+	scope TEXT NOT NULL,
+	expires_at TIMESTAMPTZ NOT NULL
+);
 CREATE TABLE IF NOT EXISTS web_sessions (
 	token_hash TEXT PRIMARY KEY,
 	csrf TEXT NOT NULL,
@@ -97,6 +104,7 @@ CREATE TABLE IF NOT EXISTS web_sessions (
 );
 CREATE INDEX IF NOT EXISTS oauth_codes_expires_idx ON oauth_codes(expires_at);
 CREATE INDEX IF NOT EXISTS oauth_tokens_expires_idx ON oauth_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_expires_idx ON oauth_refresh_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS web_sessions_expires_idx ON web_sessions(expires_at);
 `
 
@@ -470,6 +478,32 @@ func (s *Store) Token(ctx context.Context, tokenHash string) (auth.Token, bool, 
 	return token, true, nil
 }
 
+// SaveRefreshToken stores a refresh token keyed by its hash. It implements
+// auth.Store.
+func (s *Store) SaveRefreshToken(ctx context.Context, tokenHash string, token auth.Token) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO oauth_refresh_tokens (token_hash, client_id, resource, scope, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`, tokenHash, token.ClientID, token.Resource, token.Scope, token.ExpiresAt)
+	return err
+}
+
+// RefreshToken loads a refresh token by its hash. It implements auth.Store.
+func (s *Store) RefreshToken(ctx context.Context, tokenHash string) (auth.Token, bool, error) {
+	var token auth.Token
+	err := s.pool.QueryRow(ctx, `
+		SELECT client_id, resource, scope, expires_at FROM oauth_refresh_tokens WHERE token_hash = $1
+	`, tokenHash).Scan(&token.ClientID, &token.Resource, &token.Scope, &token.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.Token{}, false, nil
+	}
+	if err != nil {
+		return auth.Token{}, false, err
+	}
+	token.ExpiresAt = token.ExpiresAt.UTC()
+	return token, true, nil
+}
+
 // SaveSession persists a browser session keyed by its hash. It implements
 // web.SessionStore.
 func (s *Store) SaveSession(ctx context.Context, tokenHash, csrf string, expiresAt time.Time) error {
@@ -510,6 +544,7 @@ func (s *Store) DeleteExpiredAuthState(ctx context.Context, now time.Time) error
 	for _, statement := range []string{
 		`DELETE FROM oauth_codes WHERE expires_at < $1`,
 		`DELETE FROM oauth_tokens WHERE expires_at < $1`,
+		`DELETE FROM oauth_refresh_tokens WHERE expires_at < $1`,
 		`DELETE FROM web_sessions WHERE expires_at < $1`,
 	} {
 		if _, err := s.pool.Exec(ctx, statement, now); err != nil {

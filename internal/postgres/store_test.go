@@ -303,6 +303,29 @@ func TestOAuthTokenRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOAuthRefreshTokenRoundTrip(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	future := time.Date(2036, time.July, 20, 13, 0, 0, 0, time.UTC)
+	if err := store.SaveRefreshToken(ctx, "refhash", auth.Token{ClientID: "c", Resource: "https://x/mcp", Scope: "tasks", ExpiresAt: future}); err != nil {
+		t.Fatalf("SaveRefreshToken: %v", err)
+	}
+	got, ok, err := store.RefreshToken(ctx, "refhash")
+	if err != nil || !ok {
+		t.Fatalf("RefreshToken = ok %v, err %v", ok, err)
+	}
+	if got.ClientID != "c" || got.Resource != "https://x/mcp" || !got.ExpiresAt.Equal(future) {
+		t.Fatalf("refresh token = %#v", got)
+	}
+	// Refresh tokens live in their own table, separate from access tokens.
+	if _, ok, _ := store.Token(ctx, "refhash"); ok {
+		t.Fatal("refresh token is also readable as an access token")
+	}
+	if _, ok, _ := store.RefreshToken(ctx, "nope"); ok {
+		t.Fatal("RefreshToken(nope) ok = true, want false")
+	}
+}
+
 func TestSessionRoundTripAndDelete(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
@@ -338,8 +361,14 @@ func TestDeleteExpiredAuthState(t *testing.T) {
 	if err := store.SaveSession(ctx, "old-sess", "csrf", past); err != nil {
 		t.Fatalf("SaveSession(old): %v", err)
 	}
+	if err := store.SaveRefreshToken(ctx, "old-refresh", auth.Token{ClientID: "c", Resource: "r", Scope: "tasks", ExpiresAt: past}); err != nil {
+		t.Fatalf("SaveRefreshToken(old): %v", err)
+	}
 	if err := store.SaveToken(ctx, "new-tok", auth.Token{ClientID: "c", Resource: "r", Scope: "tasks", ExpiresAt: future}); err != nil {
 		t.Fatalf("SaveToken(new): %v", err)
+	}
+	if err := store.SaveRefreshToken(ctx, "new-refresh", auth.Token{ClientID: "c", Resource: "r", Scope: "tasks", ExpiresAt: future}); err != nil {
+		t.Fatalf("SaveRefreshToken(new): %v", err)
 	}
 	if err := store.SaveSession(ctx, "new-sess", "csrf", future); err != nil {
 		t.Fatalf("SaveSession(new): %v", err)
@@ -354,8 +383,14 @@ func TestDeleteExpiredAuthState(t *testing.T) {
 	if _, _, ok, _ := store.Session(ctx, "old-sess"); ok {
 		t.Fatal("expired session survived cleanup")
 	}
+	if _, ok, _ := store.RefreshToken(ctx, "old-refresh"); ok {
+		t.Fatal("expired refresh token survived cleanup")
+	}
 	if _, ok, _ := store.Token(ctx, "new-tok"); !ok {
 		t.Fatal("valid token removed by cleanup")
+	}
+	if _, ok, _ := store.RefreshToken(ctx, "new-refresh"); !ok {
+		t.Fatal("valid refresh token removed by cleanup")
 	}
 	if _, _, ok, _ := store.Session(ctx, "new-sess"); !ok {
 		t.Fatal("valid session removed by cleanup")

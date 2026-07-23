@@ -21,6 +21,12 @@ import (
 
 const taskScope = "tasks"
 
+// defaultRefreshTTL is deliberately long: authorizing is a manual step (the
+// user types the shared secret), so refresh tokens are effectively indefinite
+// and are not rotated. A client that keeps its refresh token never has to
+// authorize again.
+const defaultRefreshTTL = 10 * 365 * 24 * time.Hour
+
 // Client is a registered OAuth client. Client IDs are public identifiers, so
 // they are stored verbatim.
 type Client struct {
@@ -60,28 +66,32 @@ type Store interface {
 	TakeCode(ctx context.Context, codeHash string) (Code, bool, error)
 	SaveToken(ctx context.Context, tokenHash string, token Token) error
 	Token(ctx context.Context, tokenHash string) (Token, bool, error)
+	SaveRefreshToken(ctx context.Context, tokenHash string, token Token) error
+	RefreshToken(ctx context.Context, tokenHash string) (Token, bool, error)
 }
 
 type Config struct {
-	Issuer   string
-	Secret   string
-	CodeTTL  time.Duration
-	TokenTTL time.Duration
-	Now      func() time.Time
+	Issuer     string
+	Secret     string
+	CodeTTL    time.Duration
+	TokenTTL   time.Duration
+	RefreshTTL time.Duration
+	Now        func() time.Time
 	// Store persists clients, codes, and tokens. When nil, an in-memory store
 	// is used (non-durable; intended for tests and single-process use).
 	Store Store
 }
 
 type Server struct {
-	issuer    string
-	resource  string
-	secret    [32]byte
-	hasSecret bool
-	codeTTL   time.Duration
-	tokenTTL  time.Duration
-	now       func() time.Time
-	store     Store
+	issuer     string
+	resource   string
+	secret     [32]byte
+	hasSecret  bool
+	codeTTL    time.Duration
+	tokenTTL   time.Duration
+	refreshTTL time.Duration
+	now        func() time.Time
+	store      Store
 }
 
 func NewServer(config Config) *Server {
@@ -92,6 +102,9 @@ func NewServer(config Config) *Server {
 	if config.TokenTTL <= 0 {
 		config.TokenTTL = time.Hour
 	}
+	if config.RefreshTTL <= 0 {
+		config.RefreshTTL = defaultRefreshTTL
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -99,13 +112,14 @@ func NewServer(config Config) *Server {
 		config.Store = newMemoryStore()
 	}
 	server := &Server{
-		issuer:    issuer,
-		resource:  issuer + "/mcp",
-		codeTTL:   config.CodeTTL,
-		tokenTTL:  config.TokenTTL,
-		now:       config.Now,
-		store:     config.Store,
-		hasSecret: config.Secret != "",
+		issuer:     issuer,
+		resource:   issuer + "/mcp",
+		codeTTL:    config.CodeTTL,
+		tokenTTL:   config.TokenTTL,
+		refreshTTL: config.RefreshTTL,
+		now:        config.Now,
+		store:      config.Store,
+		hasSecret:  config.Secret != "",
 	}
 	server.secret = sha256.Sum256([]byte(config.Secret))
 	return server
@@ -168,7 +182,7 @@ func (s *Server) authorizationServerMetadata(w http.ResponseWriter, _ *http.Requ
 		"token_endpoint":                        s.issuer + "/oauth/token",
 		"registration_endpoint":                 s.issuer + "/oauth/register",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      strings.Fields(taskScope),
@@ -221,7 +235,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		"client_id":                  registered.ID,
 		"client_name":                registered.Name,
 		"redirect_uris":              registered.RedirectURIs,
-		"grant_types":                []string{"authorization_code"},
+		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": "none",
 	})
@@ -340,10 +354,17 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid form")
 		return
 	}
-	if r.PostForm.Get("grant_type") != "authorization_code" {
-		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code is supported")
-		return
+	switch r.PostForm.Get("grant_type") {
+	case "authorization_code":
+		s.tokenFromAuthorizationCode(w, r)
+	case "refresh_token":
+		s.tokenFromRefreshToken(w, r)
+	default:
+		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code and refresh_token are supported")
 	}
+}
+
+func (s *Server) tokenFromAuthorizationCode(w http.ResponseWriter, r *http.Request) {
 	code, ok, err := s.store.TakeCode(r.Context(), hashSecret(r.PostForm.Get("code")))
 	if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not read authorization code")
@@ -367,17 +388,63 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 		return
 	}
-	value := randomText()
-	expiresAt := s.now().Add(s.tokenTTL)
-	if err := s.store.SaveToken(r.Context(), hashSecret(value), Token{ClientID: code.ClientID, Resource: code.Resource, Scope: code.Scope, ExpiresAt: expiresAt}); err != nil {
+	s.issueTokens(w, r, code.ClientID, code.Resource, code.Scope, "")
+}
+
+func (s *Server) tokenFromRefreshToken(w http.ResponseWriter, r *http.Request) {
+	value := r.PostForm.Get("refresh_token")
+	if value == "" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required")
+		return
+	}
+	stored, ok, err := s.store.RefreshToken(r.Context(), hashSecret(value))
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not read refresh token")
+		return
+	}
+	if !ok || !s.now().Before(stored.ExpiresAt) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
+		return
+	}
+	// client_id is optional on refresh but must match when sent. The resource
+	// indicator is deliberately not re-checked: it was normalized to this
+	// server at authorization time, and clients send it inconsistently, so
+	// rejecting a mismatch here would force a needless re-authorization.
+	if clientID := r.PostForm.Get("client_id"); clientID != "" && clientID != stored.ClientID {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token was not issued to this client")
+		return
+	}
+	s.issueTokens(w, r, stored.ClientID, stored.Resource, stored.Scope, value)
+}
+
+// issueTokens mints an access token and writes the token response. When
+// existingRefresh is empty a new refresh token is minted; otherwise the
+// caller's refresh token is returned unchanged, so it stays valid and the user
+// never has to authorize again.
+func (s *Server) issueTokens(w http.ResponseWriter, r *http.Request, clientID, resource, scope, existingRefresh string) {
+	access := randomText()
+	if err := s.store.SaveToken(r.Context(), hashSecret(access), Token{
+		ClientID: clientID, Resource: resource, Scope: scope, ExpiresAt: s.now().Add(s.tokenTTL),
+	}); err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not persist access token")
 		return
 	}
+	refresh := existingRefresh
+	if refresh == "" {
+		refresh = randomText()
+		if err := s.store.SaveRefreshToken(r.Context(), hashSecret(refresh), Token{
+			ClientID: clientID, Resource: resource, Scope: scope, ExpiresAt: s.now().Add(s.refreshTTL),
+		}); err != nil {
+			writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not persist refresh token")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": value,
-		"token_type":   "Bearer",
-		"expires_in":   int(s.tokenTTL.Seconds()),
-		"scope":        code.Scope,
+		"access_token":  access,
+		"token_type":    "Bearer",
+		"expires_in":    int(s.tokenTTL.Seconds()),
+		"scope":         scope,
+		"refresh_token": refresh,
 	})
 }
 
@@ -421,17 +488,19 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 // memoryStore is a non-durable Store used when no persistent store is
 // configured (tests and single-process fallback).
 type memoryStore struct {
-	mu      sync.Mutex
-	clients map[string]Client
-	codes   map[string]Code
-	tokens  map[string]Token
+	mu            sync.Mutex
+	clients       map[string]Client
+	codes         map[string]Code
+	tokens        map[string]Token
+	refreshTokens map[string]Token
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
-		clients: make(map[string]Client),
-		codes:   make(map[string]Code),
-		tokens:  make(map[string]Token),
+		clients:       make(map[string]Client),
+		codes:         make(map[string]Code),
+		tokens:        make(map[string]Token),
+		refreshTokens: make(map[string]Token),
 	}
 }
 
@@ -481,6 +550,20 @@ func (m *memoryStore) Token(_ context.Context, tokenHash string) (Token, bool, e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	token, ok := m.tokens[tokenHash]
+	return token, ok, nil
+}
+
+func (m *memoryStore) SaveRefreshToken(_ context.Context, tokenHash string, token Token) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshTokens[tokenHash] = token
+	return nil
+}
+
+func (m *memoryStore) RefreshToken(_ context.Context, tokenHash string) (Token, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	token, ok := m.refreshTokens[tokenHash]
 	return token, ok, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -222,8 +223,8 @@ func TestRegisterAcceptsRefreshTokenGrant(t *testing.T) {
 	if registration.ClientID == "" {
 		t.Fatal("registration returned an empty client_id")
 	}
-	if len(registration.GrantTypes) != 1 || registration.GrantTypes[0] != "authorization_code" {
-		t.Fatalf("registered grant_types = %v, want [authorization_code]", registration.GrantTypes)
+	if !slices.Contains(registration.GrantTypes, "authorization_code") || !slices.Contains(registration.GrantTypes, "refresh_token") {
+		t.Fatalf("registered grant_types = %v, want authorization_code and refresh_token", registration.GrantTypes)
 	}
 }
 
@@ -290,6 +291,202 @@ func registerClient(t *testing.T, handler http.Handler, redirectURI string) stri
 		t.Fatal("registration returned an empty client_id")
 	}
 	return registration.ClientID
+}
+
+// exchangeAuthorizationCode runs authorize + token and returns the decoded
+// token response.
+func exchangeAuthorizationCode(t *testing.T, handler http.Handler, clientID, secret string) map[string]any {
+	t.Helper()
+	verifier := "0123456789012345678901234567890123456789012"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	authForm := url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"http://127.0.0.1/callback"},
+		"response_type":         {"code"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"resource":              {"https://tasks.example.com/mcp"},
+		"secret":                {secret},
+	}
+	authRequest := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(authForm.Encode()))
+	authRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	authResponse := httptest.NewRecorder()
+	handler.ServeHTTP(authResponse, authRequest)
+	if authResponse.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d; body: %s", authResponse.Code, authResponse.Body.String())
+	}
+	redirect, err := url.Parse(authResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	code := redirect.Query().Get("code")
+	if code == "" {
+		t.Fatal("authorize returned no code")
+	}
+	tokenForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"redirect_uri":  {"http://127.0.0.1/callback"},
+		"resource":      {"https://tasks.example.com/mcp"},
+		"code":          {code},
+		"code_verifier": {verifier},
+	}
+	tokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenResponse := httptest.NewRecorder()
+	handler.ServeHTTP(tokenResponse, tokenRequest)
+	if tokenResponse.Code != http.StatusOK {
+		t.Fatalf("token status = %d; body: %s", tokenResponse.Code, tokenResponse.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(tokenResponse.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	return body
+}
+
+func postForm(t *testing.T, handler http.Handler, target string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func TestRefreshTokenGrantIssuesNewAccessToken(t *testing.T) {
+	t.Parallel()
+
+	const secret = "refresh-secret"
+	server := NewServer(Config{Issuer: "https://tasks.example.com", Secret: secret})
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	clientID := registerClient(t, mux, "http://127.0.0.1/callback")
+
+	first := exchangeAuthorizationCode(t, mux, clientID, secret)
+	refresh, _ := first["refresh_token"].(string)
+	if refresh == "" {
+		t.Fatalf("token response has no refresh_token: %#v", first)
+	}
+	access, _ := first["access_token"].(string)
+	if !server.ValidToken(context.Background(), access) {
+		t.Fatal("initial access token is not valid")
+	}
+
+	response := postForm(t, mux, "/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh},
+		"client_id":     {clientID},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d; body: %s", response.Code, response.Body.String())
+	}
+	var refreshed map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &refreshed); err != nil {
+		t.Fatalf("decode refresh response: %v", err)
+	}
+	newAccess, _ := refreshed["access_token"].(string)
+	if newAccess == "" || newAccess == access {
+		t.Fatalf("refresh did not issue a new access token: %#v", refreshed)
+	}
+	if !server.ValidToken(context.Background(), newAccess) {
+		t.Fatal("refreshed access token is not valid")
+	}
+	// The refresh token must keep working so the user only authorizes once.
+	if got, _ := refreshed["refresh_token"].(string); got != refresh {
+		t.Fatalf("refresh_token = %q, want the original to remain valid", got)
+	}
+	again := postForm(t, mux, "/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh},
+		"client_id":     {clientID},
+	})
+	if again.Code != http.StatusOK {
+		t.Fatalf("second refresh status = %d, want reusable refresh token; body: %s", again.Code, again.Body.String())
+	}
+}
+
+func TestRefreshTokenRejectsUnknownAndMismatchedClient(t *testing.T) {
+	t.Parallel()
+
+	const secret = "refresh-secret"
+	server := NewServer(Config{Issuer: "https://tasks.example.com", Secret: secret})
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	clientID := registerClient(t, mux, "http://127.0.0.1/callback")
+	issued := exchangeAuthorizationCode(t, mux, clientID, secret)
+	refresh, _ := issued["refresh_token"].(string)
+
+	unknown := postForm(t, mux, "/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {"not-a-real-refresh-token"},
+		"client_id":     {clientID},
+	})
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("unknown refresh token status = %d, want %d", unknown.Code, http.StatusBadRequest)
+	}
+
+	mismatched := postForm(t, mux, "/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh},
+		"client_id":     {"some-other-client"},
+	})
+	if mismatched.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched client status = %d, want %d", mismatched.Code, http.StatusBadRequest)
+	}
+}
+
+func TestRefreshTokenIgnoresResourceIndicatorVariations(t *testing.T) {
+	t.Parallel()
+
+	const secret = "refresh-secret"
+	server := NewServer(Config{Issuer: "https://tasks.example.com", Secret: secret})
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	clientID := registerClient(t, mux, "http://127.0.0.1/callback")
+	issued := exchangeAuthorizationCode(t, mux, clientID, secret)
+	refresh, _ := issued["refresh_token"].(string)
+	if refresh == "" {
+		t.Fatalf("no refresh_token issued: %#v", issued)
+	}
+
+	// Clients send the RFC 8707 resource indicator inconsistently. None of these
+	// forms may break a refresh, or the user would have to authorize again.
+	for _, resource := range []string{"", "https://tasks.example.com", "https://tasks.example.com/mcp"} {
+		form := url.Values{
+			"grant_type":    {"refresh_token"},
+			"refresh_token": {refresh},
+			"client_id":     {clientID},
+		}
+		if resource != "" {
+			form.Set("resource", resource)
+		}
+		response := postForm(t, mux, "/oauth/token", form)
+		if response.Code != http.StatusOK {
+			t.Fatalf("refresh with resource %q status = %d; body: %s", resource, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestMetadataAdvertisesRefreshTokenGrant(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(Config{Issuer: "https://tasks.example.com", Secret: "secret"})
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil))
+
+	var metadata struct {
+		GrantTypesSupported []string `json:"grant_types_supported"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if !slices.Contains(metadata.GrantTypesSupported, "refresh_token") {
+		t.Fatalf("grant_types_supported = %v, want it to include refresh_token", metadata.GrantTypesSupported)
+	}
 }
 
 func TestBearerMiddlewareAdvertisesProtectedResource(t *testing.T) {
