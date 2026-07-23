@@ -13,6 +13,26 @@
 - Never add secrets, credentials, tokens, private keys, personal data, private URLs, internal-only information, or other non-public material.
 - Before committing, review the complete diff and staged files for accidental sensitive or private content.
 
+## Production logs
+
+Production runs as a Coolify app on `rotom`. Its Coolify resource UUID is
+`wnjat9exmw85q7vislhxtr06`; use that stable UUID instead of guessing from the
+app name. Coolify container names append a deployment-specific suffix to the
+UUID.
+
+From a machine with Tailscale access, query the app's logs with the wrapper in
+the `sysadmin` repo:
+
+```bash
+~/dev/zachlatta/sysadmin/scripts/coolify-and-server-loki-logs \
+  --format-logs --since 1h \
+  '{job="coolify",server="rotom"} | json | container_name =~ "(?i).*wnjat9exmw85q7vislhxtr06.*"'
+```
+
+The wrapper accepts other time ranges and LogQL filters; see its `--help`.
+Production logs may contain private task data, so inspect them locally and
+never paste their contents into this public repository, commits, or issues.
+
 ## Worktrees, commits, and pushes
 
 - When working in a worktree, the default finish flow is to commit completed work and push it to `main`.
