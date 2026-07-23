@@ -62,6 +62,95 @@ func TestLoginProtectsTaskPage(t *testing.T) {
 	}
 }
 
+func TestTaskDescriptionsRenderSafeMarkdown(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandler(t)
+	_, err := service.Create(context.Background(), task.CreateInput{
+		Title: "Markdown task",
+		Description: `## Launch plan
+
+- render **bold** text
+- visit [example](https://example.com)
+
+<script>alert("not safe")</script>
+
+[bad link](javascript:alert)`,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cookie, _ := login(t, handler)
+
+	page := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.AddCookie(cookie)
+	handler.ServeHTTP(page, request)
+	body := page.Body.String()
+	for _, want := range []string{
+		`<div class="description">`,
+		`<h2>Launch plan</h2>`,
+		`<li>render <strong>bold</strong> text</li>`,
+		`href="https://example.com"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("task page does not contain rendered Markdown %q; body: %s", want, body)
+		}
+	}
+	for _, unsafe := range []string{`<script>`, `href="javascript:`} {
+		if strings.Contains(body, unsafe) {
+			t.Errorf("task page contains unsafe Markdown output %q; body: %s", unsafe, body)
+		}
+	}
+}
+
+func TestTaskPageShowsOnlyRequestedTask(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "first-task", "second-task")
+	first, err := service.Create(context.Background(), task.CreateInput{Title: "First task"})
+	if err != nil {
+		t.Fatalf("create first task: %v", err)
+	}
+	second, err := service.Create(context.Background(), task.CreateInput{Title: "Second task"})
+	if err != nil {
+		t.Fatalf("create second task: %v", err)
+	}
+	cookie, _ := login(t, handler)
+
+	index := httptest.NewRecorder()
+	indexRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexRequest.AddCookie(cookie)
+	handler.ServeHTTP(index, indexRequest)
+	for _, item := range []task.Task{first, second} {
+		if want := `href="/` + item.ID + `"`; !strings.Contains(index.Body.String(), want) {
+			t.Errorf("index does not link to task %q; body: %s", item.ID, index.Body.String())
+		}
+	}
+
+	detail := httptest.NewRecorder()
+	detailRequest := httptest.NewRequest(http.MethodGet, "/"+first.ID, nil)
+	detailRequest.AddCookie(cookie)
+	handler.ServeHTTP(detail, detailRequest)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("task detail status = %d; body: %s", detail.Code, detail.Body.String())
+	}
+	if body := detail.Body.String(); !strings.Contains(body, first.Title) || strings.Contains(body, second.Title) {
+		t.Fatalf("task detail does not isolate the requested task; body: %s", body)
+	}
+	if body := detail.Body.String(); !strings.Contains(body, `<a class="back-link" href="/">All tasks</a>`) {
+		t.Errorf("task detail does not link back to all tasks; body: %s", body)
+	}
+
+	missing := httptest.NewRecorder()
+	missingRequest := httptest.NewRequest(http.MethodGet, "/missing-task", nil)
+	missingRequest.AddCookie(cookie)
+	handler.ServeHTTP(missing, missingRequest)
+	if missing.Code != http.StatusNotFound {
+		t.Errorf("missing task status = %d, want %d; body: %s", missing.Code, http.StatusNotFound, missing.Body.String())
+	}
+}
+
 func TestCreateCompleteAndUploadImage(t *testing.T) {
 	t.Parallel()
 
@@ -193,9 +282,22 @@ func (r *auditCapturingRepository) Update(ctx context.Context, item task.Task) e
 
 func testHandler(t *testing.T) (http.Handler, *task.Service) {
 	t.Helper()
+	return testHandlerWithIDs(t, strings.ToLower(t.Name())+"-id")
+}
+
+func testHandlerWithIDs(t *testing.T, ids ...string) (http.Handler, *task.Service) {
+	t.Helper()
 	root := t.TempDir()
 	repo := tasktest.NewRepository()
-	service := task.NewService(repo, time.Now, func() string { return strings.ToLower(t.Name()) + "-id" })
+	nextID := 0
+	service := task.NewService(repo, time.Now, func() string {
+		if nextID >= len(ids) {
+			t.Fatalf("test requested more than %d task IDs", len(ids))
+		}
+		id := ids[nextID]
+		nextID++
+		return id
+	})
 	handler := New(Config{
 		Tasks:   service,
 		Reader:  repo,

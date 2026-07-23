@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 	"github.com/zachlatta/tasks/internal/auth"
 	"github.com/zachlatta/tasks/internal/objectstore"
 	"github.com/zachlatta/tasks/internal/task"
@@ -45,6 +48,8 @@ const (
 
 //go:embed templates/*.html static/*.css
 var assets embed.FS
+
+var markdownRenderer = goldmark.New(goldmark.WithExtensions(extension.GFM))
 
 type Config struct {
 	Tasks         *task.Service
@@ -78,10 +83,11 @@ type session struct {
 type sessionContextKey struct{}
 
 type pageData struct {
-	Error   string
-	CSRF    string
-	Tasks   []task.Task
-	Message string
+	Error      string
+	CSRF       string
+	Tasks      []task.Task
+	Message    string
+	SingleTask bool
 }
 
 func New(config Config) http.Handler {
@@ -98,19 +104,22 @@ func New(config Config) http.Handler {
 		auth:          config.Auth,
 		secureCookies: config.SecureCookies,
 		now:           config.Now,
-		templates:     template.Must(template.ParseFS(assets, "templates/*.html")),
-		mux:           http.NewServeMux(),
-		sessions:      config.Sessions,
+		templates: template.Must(template.New("").Funcs(template.FuncMap{
+			"renderMarkdown": renderMarkdown,
+		}).ParseFS(assets, "templates/*.html")),
+		mux:      http.NewServeMux(),
+		sessions: config.Sessions,
 	}
 	h.mux.HandleFunc("GET /static/app.css", h.styles)
 	h.mux.HandleFunc("GET /login", h.loginPage)
 	h.mux.HandleFunc("POST /login", h.login)
-	h.mux.Handle("GET /", h.requireSession(http.HandlerFunc(h.index)))
+	h.mux.Handle("GET /{$}", h.requireSession(http.HandlerFunc(h.index)))
 	h.mux.Handle("POST /logout", h.requireSession(http.HandlerFunc(h.logout)))
 	h.mux.Handle("POST /tasks", h.requireSession(http.HandlerFunc(h.createTask)))
 	h.mux.Handle("POST /tasks/{id}/done", h.requireSession(http.HandlerFunc(h.completeTask)))
 	h.mux.Handle("POST /tasks/{id}/images", h.requireSession(http.HandlerFunc(h.uploadImage)))
 	h.mux.Handle("GET /images/{key...}", h.requireSession(http.HandlerFunc(h.image)))
+	h.mux.Handle("GET /{id}", h.requireSession(http.HandlerFunc(h.task)))
 	return securityHeaders(h.mux)
 }
 
@@ -170,6 +179,25 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	}
 	current := r.Context().Value(sessionContextKey{}).(session)
 	h.render(w, http.StatusOK, "index.html", pageData{CSRF: current.CSRF, Tasks: items, Message: r.URL.Query().Get("message")})
+}
+
+func (h *handler) task(w http.ResponseWriter, r *http.Request) {
+	item, err := h.tasks.Get(r.Context(), r.PathValue("id"))
+	if errors.Is(err, task.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "query task", http.StatusInternalServerError)
+		return
+	}
+	current := r.Context().Value(sessionContextKey{}).(session)
+	h.render(w, http.StatusOK, "index.html", pageData{
+		CSRF:       current.CSRF,
+		Tasks:      []task.Task{item},
+		Message:    r.URL.Query().Get("message"),
+		SingleTask: true,
+	})
 }
 
 func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
@@ -321,6 +349,14 @@ func (h *handler) render(w http.ResponseWriter, status int, name string, data pa
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = h.templates.ExecuteTemplate(w, name, data)
+}
+
+func renderMarkdown(source string) template.HTML {
+	var output bytes.Buffer
+	_ = markdownRenderer.Convert([]byte(source), &output)
+	// Goldmark omits raw HTML and dangerous URLs unless explicitly configured
+	// as unsafe, so this rendered output is safe to pass through html/template.
+	return template.HTML(output.String())
 }
 
 func securityHeaders(next http.Handler) http.Handler {

@@ -22,9 +22,29 @@ button.quiet { color: #24533f; background: transparent; }
 .task { padding: 1.2rem; border-left: .35rem solid #ca8b24; }
 .task.done { border-left-color: #718074; opacity: .75; }
 .task h3 { display: inline; margin-right: .6rem; }
+.task-link, .back-link { color: #24533f; text-underline-offset: .16em; }
+.task-link { color: inherit; text-decoration-thickness: .08em; }
 .task code { color: #66695e; }
 .status { display: block; margin-bottom: .3rem; color: #8a5a0d; font-size: .7rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
-.description { margin: 1rem 0; white-space: pre-wrap; }
+.description { margin: 1rem 0; line-height: 1.55; overflow-wrap: anywhere; }
+.description > :first-child { margin-top: 0; }
+.description > :last-child { margin-bottom: 0; }
+.description h1, .description h2, .description h3, .description h4, .description h5, .description h6 { display: block; margin: 1.1em 0 .45em; letter-spacing: -.015em; }
+.description h1 { font-size: 1.4rem; }
+.description h2 { font-size: 1.25rem; }
+.description h3 { font-size: 1.1rem; }
+.description h4, .description h5, .description h6 { font-size: 1rem; }
+.description p, .description ul, .description ol, .description blockquote, .description pre, .description table { margin: .75rem 0; }
+.description ul, .description ol { padding-left: 1.5rem; }
+.description li + li { margin-top: .25rem; }
+.description input[type="checkbox"] { width: auto; margin-right: .35rem; padding: 0; }
+.description a { color: #24533f; text-underline-offset: .14em; }
+.description blockquote { padding-left: 1rem; color: #5f635a; border-left: .25rem solid #d2cdc0; }
+.description code { padding: .12em .3em; background: #efebe1; border-radius: .25rem; }
+.description pre { padding: .8rem; overflow-x: auto; background: #efebe1; border-radius: .4rem; }
+.description pre code { padding: 0; background: transparent; }
+.description table { width: 100%; border-collapse: collapse; }
+.description th, .description td { padding: .45rem .6rem; text-align: left; border: 1px solid #d2cdc0; }
 .upload { display: flex; align-items: end; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #ded9cd; }
 .upload label { flex: 1; }
 .images { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: .75rem; }
