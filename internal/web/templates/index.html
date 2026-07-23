@@ -1,122 +1,65 @@
 {{define "index.html"}}<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tasks</title>
-  <link rel="stylesheet" href="/static/app.css">
-</head>
-<body>
-  <header>
-    <div>
-      <p class="eyebrow">POSTGRES-BACKED</p>
-      <h1>Tasks</h1>
-    </div>
-    <form method="post" action="/logout">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <button class="quiet" type="submit">Sign out</button>
-    </form>
-  </header>
+{{template "document-head" ""}}
+<body class="board-page" data-csrf="{{.CSRF}}">
+  {{template "site-header" .}}
   <main>
     {{with .Message}}<p class="notice" role="status">{{.}}</p>{{end}}
 
-    {{if .SingleTask}}
-    <section class="detail-section" aria-labelledby="detail-heading">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">TASK</p>
-          <h2 id="detail-heading">Task details</h2>
-        </div>
-        <a class="back-link" href="/">All tasks</a>
+    <section class="composer" aria-labelledby="composer-heading">
+      <div class="composer-intro">
+        <p class="eyebrow">QUICK ADD</p>
+        <h2 id="composer-heading">Capture a task</h2>
       </div>
-      <div class="task-detail">{{template "task-card" .DetailTask}}</div>
-    </section>
-    {{else}}
-    <section class="new-task" aria-labelledby="new-task-heading">
-      <div class="new-task-heading">
-        <div>
-          <p class="eyebrow">QUICK ADD</p>
-          <h2 id="new-task-heading">Create a task</h2>
-        </div>
-        <p>Capture the work now, then move it across the board.</p>
-      </div>
-      <form class="new-task-form" method="post" action="/tasks">
+      <form class="composer-form" method="post" action="/tasks">
         <input type="hidden" name="csrf" value="{{.CSRF}}">
-        <label for="task-title">Title<input id="task-title" name="title" required></label>
-        <label for="task-dependencies">Dependencies <span>(comma-separated IDs)</span><input id="task-dependencies" name="dependencies"></label>
-        <label class="description-field" for="task-description">Description<textarea id="task-description" name="description" rows="2"></textarea></label>
-        <button type="submit">Create task</button>
+        <label for="task-title">Title<input id="task-title" name="title" autocomplete="off" required></label>
+        <label for="task-dependencies">Depends on <span>comma-separated IDs</span><input id="task-dependencies" name="dependencies" autocomplete="off"></label>
+        <label class="composer-description" for="task-description">Description <span>Markdown</span><textarea id="task-description" name="description" rows="2"></textarea></label>
+        <button type="submit">Add to board</button>
       </form>
     </section>
 
-    <section class="board-section" aria-labelledby="board-heading">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">WORKFLOW</p>
-          <h2 id="board-heading">Task board</h2>
+    <div class="board-bar">
+      <div class="board-bar-title">
+        <p class="eyebrow">WORKFLOW</p>
+        <h2 id="board-heading">The board</h2>
+      </div>
+      <p class="board-hint">Drag a card anywhere on the board, or focus one and hold <kbd>⌘</kbd>/<kbd>Ctrl</kbd> with the arrow keys.</p>
+      <label class="board-filter" for="board-filter">
+        <span class="visually-hidden">Filter cards</span>
+        <input id="board-filter" type="search" placeholder="Filter {{.TaskCount}} tasks" autocomplete="off">
+      </label>
+    </div>
+
+    <div class="kanban-board" id="kanban-board" aria-labelledby="board-heading">
+      {{range .Columns}}
+      <section class="kanban-column" data-status="{{.Status}}" aria-labelledby="{{.Status}}-heading">
+        <header class="column-heading">
+          <h2 id="{{.Status}}-heading"><span class="status-dot" aria-hidden="true"></span>{{.Label}}</h2>
+          <span class="column-count">{{len .Tasks}}</span>
+        </header>
+        <div class="column-task-list" data-status="{{.Status}}" data-dropzone aria-labelledby="{{.Status}}-heading">
+          {{range .Tasks}}{{template "task-card" .}}{{end}}
+          <p class="column-empty"{{if .Tasks}} hidden{{end}}>{{.Empty}}</p>
         </div>
-        <span>{{.TaskCount}} total</span>
-      </div>
-      <div class="kanban-board">
-        <section class="kanban-column" data-status="todo" aria-labelledby="todo-heading">
-          <header class="column-heading">
-            <h2 id="todo-heading"><span class="status-dot" aria-hidden="true"></span>To do</h2>
-            <span class="column-count">{{len .TodoTasks}}</span>
-          </header>
-          <div class="column-task-list">
-            {{range .TodoTasks}}{{template "task-card" .}}{{else}}<p class="column-empty">No tasks waiting.</p>{{end}}
-          </div>
-        </section>
-
-        <section class="kanban-column" data-status="in_progress" aria-labelledby="in-progress-heading">
-          <header class="column-heading">
-            <h2 id="in-progress-heading"><span class="status-dot" aria-hidden="true"></span>In progress</h2>
-            <span class="column-count">{{len .InProgressTasks}}</span>
-          </header>
-          <div class="column-task-list">
-            {{range .InProgressTasks}}{{template "task-card" .}}{{else}}<p class="column-empty">Nothing in motion.</p>{{end}}
-          </div>
-        </section>
-
-        <section class="kanban-column" data-status="done" aria-labelledby="done-heading">
-          <header class="column-heading">
-            <h2 id="done-heading"><span class="status-dot" aria-hidden="true"></span>Done</h2>
-            <span class="column-count">{{len .DoneTasks}}</span>
-          </header>
-          <div class="column-task-list">
-            {{range .DoneTasks}}{{template "task-card" .}}{{else}}<p class="column-empty">Completed tasks land here.</p>{{end}}
-          </div>
-        </section>
-      </div>
-    </section>
-    {{end}}
+      </section>
+      {{end}}
+    </div>
   </main>
+
+  <div class="drawer" id="task-drawer" hidden>
+    <div class="drawer-scrim" data-drawer-close></div>
+    <section class="drawer-panel" role="dialog" aria-modal="true" aria-label="Task detail" tabindex="-1">
+      <header class="drawer-bar">
+        <p class="eyebrow">TASK</p>
+        <button class="icon-button" type="button" data-drawer-close aria-label="Close task detail">{{template "icon-close"}}</button>
+      </header>
+      <div class="drawer-body" id="drawer-body"></div>
+    </section>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>{{end}}
-
-{{define "task-card"}}<article class="task {{.Status}}">
-  <div class="task-heading">
-    <div class="task-title">
-      <h3><a class="task-link" href="/{{.ID}}">{{.Title}}</a></h3>
-      <code class="task-id">{{.ID}}</code>
-    </div>
-    {{if .Action}}<form method="post" action="{{.Action}}">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <button class="small" type="submit">{{.ActionLabel}}</button>
-    </form>{{end}}
-  </div>
-  {{with .Description}}<div class="description">{{renderMarkdown .}}</div>{{end}}
-  {{with .Dependencies}}<p class="dependencies"><strong>Depends on</strong>{{range .}}<a href="/{{.}}"><code>{{.}}</code></a>{{end}}</p>{{end}}
-  {{with .Attachments}}<div class="attachments">{{range .}}
-    {{if isImage .ContentType}}<figure><img src="/attachments/{{.Key}}" alt="{{.Name}}"><figcaption><a href="/attachments/{{.Key}}" download="{{.Name}}">{{.Name}}</a></figcaption></figure>
-    {{else}}<a class="file-attachment" href="/attachments/{{.Key}}" download="{{.Name}}">{{.Name}}</a>{{end}}
-  {{end}}</div>{{end}}
-  {{if ne .Status "done"}}<details class="attachment-panel">
-    <summary>Attach a file</summary>
-    <form class="upload" method="post" enctype="multipart/form-data" action="/tasks/{{.ID}}/attachments">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <label>File<input type="file" name="file" required></label>
-      <button class="quiet small" type="submit">Upload</button>
-    </form>
-  </details>{{end}}
-</article>{{end}}

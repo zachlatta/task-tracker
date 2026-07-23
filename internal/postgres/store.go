@@ -42,9 +42,26 @@ CREATE TABLE IF NOT EXISTS tasks (
 	status TEXT NOT NULL,
 	created_at TIMESTAMPTZ NOT NULL,
 	updated_at TIMESTAMPTZ NOT NULL,
-	version BIGINT NOT NULL DEFAULT 1
+	version BIGINT NOT NULL DEFAULT 1,
+	position DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS position DOUBLE PRECISION NOT NULL DEFAULT 0;
+-- Tasks stored before the board could be reordered by hand all share position
+-- zero. Spread them out once, keeping the newest-first order they were shown in.
+DO $$
+BEGIN
+	IF EXISTS (SELECT 1 FROM tasks) AND NOT EXISTS (SELECT 1 FROM tasks WHERE position <> 0) THEN
+		UPDATE tasks t
+		SET position = ordered.rank * 1024
+		FROM (
+			SELECT id, row_number() OVER (PARTITION BY status ORDER BY created_at DESC, id) AS rank
+			FROM tasks
+		) ordered
+		WHERE t.id = ordered.id;
+	END IF;
+END
+$$;
 DO $$
 BEGIN
 	IF NOT EXISTS (
@@ -118,7 +135,8 @@ SELECT
 	) THEN 1 ELSE 0 END AS blocked,
 	(SELECT count(*) FROM dependencies d WHERE d.task_id = t.id) AS dependency_count,
 	(SELECT count(*) FROM images i WHERE i.task_id = t.id) AS image_count,
-	t.version
+	t.version,
+	t.position
 FROM tasks t;
 CREATE TABLE IF NOT EXISTS oauth_clients (
 	id TEXT PRIMARY KEY,
@@ -204,9 +222,9 @@ func (s *Store) Create(ctx context.Context, item task.Task) error {
 	}
 	return s.withTx(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
-			INSERT INTO tasks (id, title, description, status, created_at, updated_at, version)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-		`, item.ID, item.Title, item.Description, string(item.Status), item.CreatedAt, item.UpdatedAt, item.Version)
+			INSERT INTO tasks (id, title, description, status, position, created_at, updated_at, version)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, item.ID, item.Title, item.Description, string(item.Status), item.Position, item.CreatedAt, item.UpdatedAt, item.Version)
 		if err != nil {
 			if isUniqueViolation(err) {
 				return task.ErrAlreadyExists
@@ -234,9 +252,9 @@ func (s *Store) Update(ctx context.Context, item task.Task) error {
 		}
 		tag, err := tx.Exec(ctx, `
 			UPDATE tasks
-			SET title = $2, description = $3, status = $4, updated_at = $5, version = $6
-			WHERE id = $1 AND version = $7
-		`, item.ID, item.Title, item.Description, string(item.Status), item.UpdatedAt, item.Version, before.Version)
+			SET title = $2, description = $3, status = $4, position = $5, updated_at = $6, version = $7
+			WHERE id = $1 AND version = $8
+		`, item.ID, item.Title, item.Description, string(item.Status), item.Position, item.UpdatedAt, item.Version, before.Version)
 		if err != nil {
 			return err
 		}
@@ -262,9 +280,9 @@ func (s *Store) Get(ctx context.Context, id string) (task.Task, error) {
 	var item task.Task
 	var status string
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, title, description, status, created_at, updated_at, version
+		SELECT id, title, description, status, position, created_at, updated_at, version
 		FROM tasks WHERE id = $1
-	`, id).Scan(&item.ID, &item.Title, &item.Description, &status, &item.CreatedAt, &item.UpdatedAt, &item.Version)
+	`, id).Scan(&item.ID, &item.Title, &item.Description, &status, &item.Position, &item.CreatedAt, &item.UpdatedAt, &item.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return task.Task{}, task.ErrNotFound
 	}
@@ -285,7 +303,7 @@ func (s *Store) Get(ctx context.Context, id string) (task.Task, error) {
 // tasks themselves is left to the caller.
 func (s *Store) List(ctx context.Context) ([]task.Task, error) {
 	return s.projection(ctx, `
-		SELECT id, title, description, status, created_at, updated_at, version FROM tasks
+		SELECT id, title, description, status, position, created_at, updated_at, version FROM tasks
 	`)
 }
 
@@ -293,9 +311,13 @@ func (s *Store) List(ctx context.Context) ([]task.Task, error) {
 // matching the fixed projection the web UI renders.
 func (s *Store) Tasks(ctx context.Context) ([]task.Task, error) {
 	return s.projection(ctx, `
-		SELECT id, title, description, status, created_at, updated_at, version
+		SELECT id, title, description, status, position, created_at, updated_at, version
 		FROM tasks
-		ORDER BY CASE status WHEN 'todo' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END, created_at DESC
+		ORDER BY
+			CASE status WHEN 'todo' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
+			position,
+			created_at DESC,
+			id
 	`)
 }
 
@@ -310,7 +332,7 @@ func (s *Store) projection(ctx context.Context, taskQuery string) ([]task.Task, 
 	for rows.Next() {
 		var item task.Task
 		var status string
-		if err := rows.Scan(&item.ID, &item.Title, &item.Description, &status, &item.CreatedAt, &item.UpdatedAt, &item.Version); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.Description, &status, &item.Position, &item.CreatedAt, &item.UpdatedAt, &item.Version); err != nil {
 			return nil, err
 		}
 		item.Status = task.Status(status)
@@ -516,10 +538,10 @@ func taskForUpdate(ctx context.Context, tx pgx.Tx, id string) (task.Task, error)
 	var item task.Task
 	var status string
 	err := tx.QueryRow(ctx, `
-		SELECT id, title, description, status, created_at, updated_at, version
+		SELECT id, title, description, status, position, created_at, updated_at, version
 		FROM tasks WHERE id = $1
 		FOR UPDATE
-	`, id).Scan(&item.ID, &item.Title, &item.Description, &status, &item.CreatedAt, &item.UpdatedAt, &item.Version)
+	`, id).Scan(&item.ID, &item.Title, &item.Description, &status, &item.Position, &item.CreatedAt, &item.UpdatedAt, &item.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return task.Task{}, task.ErrNotFound
 	}

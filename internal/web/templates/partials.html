@@ -1,0 +1,82 @@
+{{define "document-head"}}<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{if .}}{{.}} · Tasks{{else}}Tasks{{end}}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>{{end}}
+
+{{define "site-header"}}<header class="site-header">
+  <div class="masthead">
+    <p class="eyebrow">POSTGRES-BACKED</p>
+    <h1><a href="/">Tasks</a></h1>
+  </div>
+  <form method="post" action="/logout">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="quiet" type="submit">Sign out</button>
+  </form>
+</header>{{end}}
+
+{{define "task-card"}}<article class="task-card" data-task-id="{{.ID}}" data-status="{{.Status}}" draggable="true" tabindex="0" aria-label="{{.Title}}, {{.StatusLabel}}">
+  <a class="card-title" href="/{{.ID}}" draggable="false">{{.Title}}</a>
+  {{with .Excerpt}}<p class="card-excerpt">{{.}}</p>{{end}}
+  {{with .Cover}}<img class="card-cover" src="/attachments/{{.Key}}" alt="" loading="lazy" draggable="false">{{end}}
+  <div class="card-meta">
+    <code class="task-id">{{.ID}}</code>
+    {{if .Blocked}}<span class="chip chip-blocked">Blocked</span>{{end}}
+    {{if .DependsOn}}<span class="chip">{{len .DependsOn}} dep{{if gt (len .DependsOn) 1}}s{{end}}</span>{{end}}
+    {{if .Attachments}}<span class="chip">{{len .Attachments}} file{{if gt (len .Attachments) 1}}s{{end}}</span>{{end}}
+    <time class="card-time" datetime="{{.Timestamp}}">{{.Relative}}</time>
+  </div>
+  <details class="card-move">
+    <summary aria-label="Move {{.Title}}">{{template "icon-move"}}</summary>
+    <form method="post" action="/tasks/{{.ID}}/move">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      {{range .Moves}}<button type="submit" name="status" value="{{.Status}}">{{.Label}}</button>{{end}}
+    </form>
+  </details>
+</article>{{end}}
+
+{{define "task-detail"}}<article class="task-detail" data-task-id="{{.ID}}" data-status="{{.Status}}">
+  <header class="detail-head">
+    <span class="status-pill">{{.StatusLabel}}</span>
+    <h2>{{.Title}}</h2>
+    <p class="detail-stamp"><code class="task-id">{{.ID}}</code><time datetime="{{.Timestamp}}">updated {{.Relative}}</time></p>
+  </header>
+
+  <form class="detail-moves" method="post" action="/tasks/{{.ID}}/move">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <span class="field-label">Move to</span>
+    {{range .Moves}}<button class="ghost" type="submit" name="status" value="{{.Status}}">{{.Label}}</button>{{end}}
+  </form>
+
+  {{if .Description}}<div class="description">{{renderMarkdown .Description}}</div>
+  {{else}}<p class="detail-empty">No description yet.</p>{{end}}
+
+  {{with .DependsOn}}<section class="detail-block">
+    <h3>Depends on</h3>
+    <ul class="dependency-list">
+      {{range .}}<li{{if .Done}} class="done"{{end}}><a href="/{{.ID}}">{{.Title}}</a><span class="chip">{{.StatusLabel}}</span></li>{{end}}
+    </ul>
+  </section>{{end}}
+
+  {{with .Attachments}}<section class="detail-block">
+    <h3>Files</h3>
+    <div class="attachments">{{range .}}
+      {{if isImage .ContentType}}<figure><img src="/attachments/{{.Key}}" alt="{{.Name}}" loading="lazy"><figcaption><a href="/attachments/{{.Key}}" download="{{.Name}}">{{.Name}}</a></figcaption></figure>
+      {{else}}<a class="file-attachment" href="/attachments/{{.Key}}" download="{{.Name}}">{{.Name}}</a>{{end}}
+    {{end}}</div>
+  </section>{{end}}
+
+  <details class="attachment-panel">
+    <summary>Attach a file</summary>
+    <form class="upload" method="post" enctype="multipart/form-data" action="/tasks/{{.ID}}/attachments">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label>File<input type="file" name="file" required></label>
+      <button class="quiet small" type="submit">Upload</button>
+    </form>
+  </details>
+</article>{{end}}
+
+{{define "icon-move"}}<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>{{end}}
+
+{{define "icon-close"}}<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>{{end}}

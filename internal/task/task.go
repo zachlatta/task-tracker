@@ -38,12 +38,18 @@ type Task struct {
 	Title        string       `json:"title" yaml:"title"`
 	Description  string       `json:"description" yaml:"-"`
 	Status       Status       `json:"status" yaml:"status"`
+	Position     float64      `json:"position" yaml:"position"`
 	Dependencies []string     `json:"dependencies,omitempty" yaml:"dependencies,omitempty"`
 	Attachments  []Attachment `json:"attachments,omitempty" yaml:"attachments,omitempty"`
 	CreatedAt    time.Time    `json:"created_at" yaml:"created_at"`
 	UpdatedAt    time.Time    `json:"updated_at" yaml:"updated_at"`
 	Version      int64        `json:"version" yaml:"version"`
 }
+
+// positionGap is the spacing a task claims when it lands at the top or bottom
+// of a column. Landing between two cards takes the midpoint of its neighbors
+// instead, so a single row changes per move.
+const positionGap = 1024
 
 type Repository interface {
 	Create(context.Context, Task) error
@@ -134,12 +140,18 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Task, error) {
 			return Task{}, err
 		}
 	}
+	todo, err := s.column(ctx, StatusTodo)
+	if err != nil {
+		return Task{}, err
+	}
+	position, _ := positionAt(todo, 0)
 	now := s.now().UTC()
 	created := Task{
 		ID:           s.newID(),
 		Title:        input.Title,
 		Description:  input.Description,
 		Status:       StatusTodo,
+		Position:     position,
 		Dependencies: dependencies,
 		CreatedAt:    now,
 		UpdatedAt:    now,
@@ -162,22 +174,7 @@ func (s *Service) Complete(ctx context.Context, id string) (Task, error) {
 	if current.Status == StatusDone {
 		return clone(current), nil
 	}
-	for _, dependency := range current.Dependencies {
-		required, err := s.repository.Get(ctx, dependency)
-		if err != nil {
-			return Task{}, err
-		}
-		if required.Status != StatusDone {
-			return Task{}, fmt.Errorf("%w: %s", ErrBlocked, dependency)
-		}
-	}
-	current.Status = StatusDone
-	current.UpdatedAt = s.now().UTC()
-	current.Version++
-	if err := s.repository.Update(withAuditAction(ctx, "complete"), current); err != nil {
-		return Task{}, err
-	}
-	return clone(current), nil
+	return s.Move(ctx, id, StatusDone, 0)
 }
 
 func (s *Service) Start(ctx context.Context, id string) (Task, error) {
@@ -191,10 +188,66 @@ func (s *Service) Start(ctx context.Context, id string) (Task, error) {
 	if current.Status != StatusTodo {
 		return Task{}, fmt.Errorf("%w: only todo tasks can be started", ErrInvalid)
 	}
-	current.Status = StatusInProgress
+	return s.Move(ctx, id, StatusInProgress, 0)
+}
+
+// Move places a task at index within the column for status, which is how the
+// board's drag and drop reorders a column and moves work between columns. An
+// index outside the column clamps to its nearest end, and a move that changes
+// nothing is a no-op. Moving into done still requires completed dependencies.
+func (s *Service) Move(ctx context.Context, id string, status Status, index int) (Task, error) {
+	switch status {
+	case StatusTodo, StatusInProgress, StatusDone:
+	default:
+		return Task{}, fmt.Errorf("%w: unknown status %q", ErrInvalid, status)
+	}
+	current, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	if status == StatusDone {
+		for _, dependency := range current.Dependencies {
+			required, err := s.repository.Get(ctx, dependency)
+			if err != nil {
+				return Task{}, err
+			}
+			if required.Status != StatusDone {
+				return Task{}, fmt.Errorf("%w: %s", ErrBlocked, dependency)
+			}
+		}
+	}
+	column, err := s.column(ctx, status)
+	if err != nil {
+		return Task{}, err
+	}
+	from := slices.IndexFunc(column, func(item Task) bool { return item.ID == id })
+	if from >= 0 {
+		column = slices.Delete(column, from, from+1)
+	}
+	index = min(max(index, 0), len(column))
+	if current.Status == status && from == index {
+		return clone(current), nil
+	}
+	position, ok := positionAt(column, index)
+	if !ok {
+		// Neighboring positions have no value between them, which also covers
+		// tasks imported before positions existed and still sharing zero.
+		if column, err = s.rebalance(ctx, column); err != nil {
+			return Task{}, err
+		}
+		if position, ok = positionAt(column, index); !ok {
+			return Task{}, fmt.Errorf("%w: cannot place task in the %s column", ErrInvalid, status)
+		}
+	}
+	action := "reorder"
+	if current.Status != status {
+		action = statusAction(status)
+	}
+	current.Status = status
+	current.Position = position
 	current.UpdatedAt = s.now().UTC()
 	current.Version++
-	if err := s.repository.Update(withAuditAction(ctx, "start"), current); err != nil {
+	if err := s.repository.Update(withAuditAction(ctx, action), current); err != nil {
 		return Task{}, err
 	}
 	return clone(current), nil
@@ -264,6 +317,80 @@ func (s *Service) Edit(ctx context.Context, id string, input EditInput) (Task, e
 	return clone(edited), nil
 }
 
+// column returns the tasks in one board column, top first.
+func (s *Service) column(ctx context.Context, status Status) ([]Task, error) {
+	items, err := s.repository.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	column := make([]Task, 0, len(items))
+	for _, item := range items {
+		if item.Status == status {
+			column = append(column, clone(item))
+		}
+	}
+	sort.SliceStable(column, func(i, j int) bool { return beforeInColumn(column[i], column[j]) })
+	return column, nil
+}
+
+// rebalance spreads a column's positions back out. It is the rare fallback for
+// a gap that can no longer be split, so it writes every other card in the
+// column while leaving their user-visible fields alone.
+func (s *Service) rebalance(ctx context.Context, column []Task) ([]Task, error) {
+	for index := range column {
+		column[index].Position = float64(index+1) * positionGap
+		column[index].Version++
+		if err := s.repository.Update(withAuditAction(ctx, "rebalance"), column[index]); err != nil {
+			return nil, err
+		}
+	}
+	return column, nil
+}
+
+// positionAt returns the position a task needs to sit at index in column, which
+// must exclude the task being placed. It reports false when the neighboring
+// positions leave no value in between.
+func positionAt(column []Task, index int) (float64, bool) {
+	switch {
+	case len(column) == 0:
+		return 0, true
+	case index <= 0:
+		return column[0].Position - positionGap, true
+	case index >= len(column):
+		return column[len(column)-1].Position + positionGap, true
+	}
+	previous, next := column[index-1].Position, column[index].Position
+	middle := previous + (next-previous)/2
+	if !(middle > previous && middle < next) {
+		return 0, false
+	}
+	return middle, true
+}
+
+func statusAction(status Status) string {
+	switch status {
+	case StatusTodo:
+		return "reopen"
+	case StatusInProgress:
+		return "start"
+	case StatusDone:
+		return "complete"
+	}
+	return "move"
+}
+
+// beforeInColumn orders one column: by hand-set position, then newest first for
+// tasks that have never been dragged and still share a position.
+func beforeInColumn(first, second Task) bool {
+	if first.Position != second.Position {
+		return first.Position < second.Position
+	}
+	if !first.CreatedAt.Equal(second.CreatedAt) {
+		return first.CreatedAt.After(second.CreatedAt)
+	}
+	return first.ID < second.ID
+}
+
 func (s *Service) Get(ctx context.Context, id string) (Task, error) {
 	item, err := s.repository.Get(ctx, id)
 	return clone(item), err
@@ -278,7 +405,7 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 		if items[i].Status != items[j].Status {
 			return statusOrder(items[i].Status) < statusOrder(items[j].Status)
 		}
-		return items[i].CreatedAt.After(items[j].CreatedAt)
+		return beforeInColumn(items[i], items[j])
 	})
 	for i := range items {
 		items[i] = clone(items[i])

@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -107,6 +108,181 @@ func TestListOrdersTasksByWorkflowStateThenNewest(t *testing.T) {
 	want := []string{"newer-todo", "older-todo", "active", "done"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("task order = %v, want %v", got, want)
+	}
+}
+
+func TestCreatePlacesNewTasksAtTheTopOfTodo(t *testing.T) {
+	t.Parallel()
+
+	service, _ := boardService(t, "first", "second", "third")
+	for _, title := range []string{"First", "Second", "Third"} {
+		if _, err := service.Create(context.Background(), CreateInput{Title: title}); err != nil {
+			t.Fatalf("Create %q: %v", title, err)
+		}
+	}
+
+	if got, want := columnIDs(t, service, StatusTodo), []string{"third", "second", "first"}; !slices.Equal(got, want) {
+		t.Fatalf("todo column = %v, want %v", got, want)
+	}
+}
+
+func TestMoveReordersTasksWithinAColumn(t *testing.T) {
+	t.Parallel()
+
+	service, _ := boardService(t, "first", "second", "third")
+	seed(t, service, "First", "Second", "Third")
+	// Newest first, so the column starts as third, second, first.
+
+	if _, err := service.Move(context.Background(), "first", StatusTodo, 0); err != nil {
+		t.Fatalf("Move to the top: %v", err)
+	}
+	if got, want := columnIDs(t, service, StatusTodo), []string{"first", "third", "second"}; !slices.Equal(got, want) {
+		t.Fatalf("column after moving to the top = %v, want %v", got, want)
+	}
+
+	if _, err := service.Move(context.Background(), "first", StatusTodo, 1); err != nil {
+		t.Fatalf("Move to the middle: %v", err)
+	}
+	if got, want := columnIDs(t, service, StatusTodo), []string{"third", "first", "second"}; !slices.Equal(got, want) {
+		t.Fatalf("column after moving to the middle = %v, want %v", got, want)
+	}
+
+	// An index past the end lands at the bottom rather than failing.
+	if _, err := service.Move(context.Background(), "third", StatusTodo, 99); err != nil {
+		t.Fatalf("Move past the end: %v", err)
+	}
+	if got, want := columnIDs(t, service, StatusTodo), []string{"first", "second", "third"}; !slices.Equal(got, want) {
+		t.Fatalf("column after moving past the end = %v, want %v", got, want)
+	}
+}
+
+func TestMovePlacesTaskAtIndexInTargetColumn(t *testing.T) {
+	t.Parallel()
+
+	service, _ := boardService(t, "first", "second", "third")
+	seed(t, service, "First", "Second", "Third")
+
+	for _, move := range []struct {
+		id    string
+		index int
+	}{{"first", 0}, {"third", 1}, {"second", 1}} {
+		if _, err := service.Move(context.Background(), move.id, StatusInProgress, move.index); err != nil {
+			t.Fatalf("Move %q: %v", move.id, err)
+		}
+	}
+
+	if got, want := columnIDs(t, service, StatusInProgress), []string{"first", "second", "third"}; !slices.Equal(got, want) {
+		t.Fatalf("in-progress column = %v, want %v", got, want)
+	}
+	if got := columnIDs(t, service, StatusTodo); len(got) != 0 {
+		t.Fatalf("todo column = %v, want empty", got)
+	}
+}
+
+func TestMoveReopensCompletedTasks(t *testing.T) {
+	t.Parallel()
+
+	service, _ := boardService(t, "revive")
+	seed(t, service, "Revive me")
+	if _, err := service.Complete(context.Background(), "revive"); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	reopened, err := service.Move(context.Background(), "revive", StatusTodo, 0)
+	if err != nil {
+		t.Fatalf("Move back to todo: %v", err)
+	}
+	if reopened.Status != StatusTodo {
+		t.Fatalf("status = %q, want %q", reopened.Status, StatusTodo)
+	}
+}
+
+func TestMoveToDoneStillRespectsDependencies(t *testing.T) {
+	t.Parallel()
+
+	service, _ := boardService(t, "prerequisite", "blocked")
+	if _, err := service.Create(context.Background(), CreateInput{Title: "Prerequisite"}); err != nil {
+		t.Fatalf("Create prerequisite: %v", err)
+	}
+	if _, err := service.Create(context.Background(), CreateInput{Title: "Blocked", Dependencies: []string{"prerequisite"}}); err != nil {
+		t.Fatalf("Create blocked: %v", err)
+	}
+
+	if _, err := service.Move(context.Background(), "blocked", StatusDone, 0); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Move error = %v, want ErrBlocked", err)
+	}
+	stayed, err := service.Get(context.Background(), "blocked")
+	if err != nil || stayed.Status != StatusTodo || stayed.Version != 1 {
+		t.Fatalf("blocked task after rejected move = %#v, %v", stayed, err)
+	}
+}
+
+func TestMoveRejectsUnknownStatus(t *testing.T) {
+	t.Parallel()
+
+	service, _ := boardService(t, "only")
+	seed(t, service, "Only task")
+
+	if _, err := service.Move(context.Background(), "only", Status("archived"), 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Move error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestMoveToTheSamePlaceRecordsNothing(t *testing.T) {
+	t.Parallel()
+
+	service, _ := boardService(t, "first", "second")
+	seed(t, service, "First", "Second")
+	// The column reads second, first.
+
+	before, err := service.Get(context.Background(), "first")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	after, err := service.Move(context.Background(), "first", StatusTodo, 1)
+	if err != nil {
+		t.Fatalf("Move in place: %v", err)
+	}
+	if after.Version != before.Version || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("in-place move = version %d at %v, want unchanged version %d at %v",
+			after.Version, after.UpdatedAt, before.Version, before.UpdatedAt)
+	}
+}
+
+func TestMoveRebalancesColumnWhenPositionsRunOut(t *testing.T) {
+	t.Parallel()
+
+	repo := newMemoryRepository()
+	base := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	// Adjacent float positions leave no value in between, and tasks imported
+	// before positions existed all share position zero.
+	for _, item := range []Task{
+		{ID: "top", Title: "Top", Status: StatusTodo, Position: 1, CreatedAt: base, Version: 1},
+		{ID: "bottom", Title: "Bottom", Status: StatusTodo, Position: math.Nextafter(1, 2), CreatedAt: base, Version: 1},
+		{ID: "mover", Title: "Mover", Status: StatusInProgress, CreatedAt: base, Version: 1},
+	} {
+		if err := repo.Create(context.Background(), item); err != nil {
+			t.Fatalf("seed %q: %v", item.ID, err)
+		}
+	}
+	service := NewService(repo, func() time.Time { return base }, func() string { return "unused" })
+
+	if _, err := service.Move(context.Background(), "mover", StatusTodo, 1); err != nil {
+		t.Fatalf("Move between exhausted positions: %v", err)
+	}
+	if got, want := columnIDs(t, service, StatusTodo), []string{"top", "mover", "bottom"}; !slices.Equal(got, want) {
+		t.Fatalf("column after rebalance = %v, want %v", got, want)
+	}
+	positions := map[string]float64{}
+	items, err := service.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, item := range items {
+		positions[item.ID] = item.Position
+	}
+	if positions["top"] >= positions["mover"] || positions["mover"] >= positions["bottom"] {
+		t.Fatalf("rebalanced positions are not strictly increasing: %#v", positions)
 	}
 }
 
@@ -297,6 +473,51 @@ func TestEditRequiresARequestedChangeAndSkipsNoOpWrites(t *testing.T) {
 	if unchanged.Version != created.Version || !unchanged.UpdatedAt.Equal(created.UpdatedAt) {
 		t.Fatalf("no-op Edit changed version/time: %#v", unchanged)
 	}
+}
+
+// boardService returns a service whose clock advances a minute per call and
+// whose IDs come from ids in order, so board ordering assertions stay readable.
+func boardService(t *testing.T, ids ...string) (*Service, *memoryRepository) {
+	t.Helper()
+	repo := newMemoryRepository()
+	now := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	next := 0
+	service := NewService(repo, func() time.Time {
+		now = now.Add(time.Minute)
+		return now
+	}, func() string {
+		if next >= len(ids) {
+			t.Fatalf("test requested more than %d task IDs", len(ids))
+		}
+		id := ids[next]
+		next++
+		return id
+	})
+	return service, repo
+}
+
+func seed(t *testing.T, service *Service, titles ...string) {
+	t.Helper()
+	for _, title := range titles {
+		if _, err := service.Create(context.Background(), CreateInput{Title: title}); err != nil {
+			t.Fatalf("seed %q: %v", title, err)
+		}
+	}
+}
+
+func columnIDs(t *testing.T, service *Service, status Status) []string {
+	t.Helper()
+	items, err := service.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Status == status {
+			ids = append(ids, item.ID)
+		}
+	}
+	return ids
 }
 
 type memoryRepository struct {

@@ -3,12 +3,14 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +68,7 @@ func TestTaskDescriptionsRenderSafeMarkdown(t *testing.T) {
 	t.Parallel()
 
 	handler, service := testHandler(t)
-	_, err := service.Create(context.Background(), task.CreateInput{
+	created, err := service.Create(context.Background(), task.CreateInput{
 		Title: "Markdown task",
 		Description: `## Launch plan
 
@@ -82,11 +84,8 @@ func TestTaskDescriptionsRenderSafeMarkdown(t *testing.T) {
 	}
 	cookie, _ := login(t, handler)
 
-	page := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.AddCookie(cookie)
-	handler.ServeHTTP(page, request)
-	body := page.Body.String()
+	detail := get(t, handler, "/"+created.ID, cookie)
+	body := detail.Body.String()
 	for _, want := range []string{
 		`<div class="description">`,
 		`<h2>Launch plan</h2>`,
@@ -94,12 +93,23 @@ func TestTaskDescriptionsRenderSafeMarkdown(t *testing.T) {
 		`href="https://example.com"`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("task page does not contain rendered Markdown %q; body: %s", want, body)
+			t.Errorf("task detail does not contain rendered Markdown %q; body: %s", want, body)
 		}
 	}
 	for _, unsafe := range []string{`<script>`, `href="javascript:`} {
 		if strings.Contains(body, unsafe) {
-			t.Errorf("task page contains unsafe Markdown output %q; body: %s", unsafe, body)
+			t.Errorf("task detail contains unsafe Markdown output %q; body: %s", unsafe, body)
+		}
+	}
+
+	// The board shows a plain-text preview instead of the full description.
+	board := get(t, handler, "/", cookie).Body.String()
+	if !strings.Contains(board, "Launch plan render bold text") {
+		t.Errorf("board card does not show a description preview; body: %s", board)
+	}
+	for _, unwanted := range []string{`<h2>Launch plan</h2>`, `<div class="description">`} {
+		if strings.Contains(board, unwanted) {
+			t.Errorf("board card renders full description markup %q; body: %s", unwanted, board)
 		}
 	}
 }
@@ -154,8 +164,7 @@ func TestTaskPageShowsOnlyRequestedTask(t *testing.T) {
 func TestIndexRendersTasksAsKanbanBoard(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	repository := tasktest.NewRepository()
+	handler, repository := boardHandler(t)
 	now := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
 	for _, item := range []task.Task{
 		{ID: "plan-launch", Title: "Plan the launch", Status: task.StatusTodo, CreatedAt: now, UpdatedAt: now, Version: 1},
@@ -166,23 +175,12 @@ func TestIndexRendersTasksAsKanbanBoard(t *testing.T) {
 			t.Fatalf("seed task %q: %v", item.ID, err)
 		}
 	}
-	service := task.NewService(repository, time.Now, func() string { return "new-task" })
-	handler := New(Config{
-		Tasks:   service,
-		Reader:  repository,
-		Objects: objectstore.NewLocal(filepath.Join(root, "objects")),
-		Auth:    auth.NewServer(auth.Config{Issuer: "http://tasks.example.com", Secret: "shared-secret"}),
-	})
 	cookie, _ := login(t, handler)
 
-	page := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.AddCookie(cookie)
-	handler.ServeHTTP(page, request)
+	page := get(t, handler, "/", cookie)
 	if page.Code != http.StatusOK {
 		t.Fatalf("index status = %d; body: %s", page.Code, page.Body.String())
 	}
-
 	body := page.Body.String()
 	if !strings.Contains(body, `class="kanban-board"`) {
 		t.Fatalf("index does not render a kanban board; body: %s", body)
@@ -202,18 +200,209 @@ func TestIndexRendersTasksAsKanbanBoard(t *testing.T) {
 	if !strings.Contains(todoColumn, "Plan the launch") || strings.Contains(todoColumn, "Build the launch") || strings.Contains(todoColumn, "Write the brief") {
 		t.Fatalf("todo column contains the wrong tasks: %s", todoColumn)
 	}
-	if !strings.Contains(inProgressColumn, "Build the launch") || strings.Contains(inProgressColumn, "Plan the launch") || strings.Contains(inProgressColumn, "Write the brief") {
+	if !strings.Contains(inProgressColumn, "Build the launch") || strings.Contains(inProgressColumn, "Plan the launch") {
 		t.Fatalf("in-progress column contains the wrong tasks: %s", inProgressColumn)
 	}
-	if !strings.Contains(doneColumn, "Write the brief") || strings.Contains(doneColumn, "Plan the launch") || strings.Contains(doneColumn, "Build the launch") {
+	if !strings.Contains(doneColumn, "Write the brief") || strings.Contains(doneColumn, "Plan the launch") {
 		t.Fatalf("done column contains the wrong tasks: %s", doneColumn)
 	}
-	if !strings.Contains(todoColumn, `/tasks/plan-launch/start`) || !strings.Contains(inProgressColumn, `/tasks/build-launch/done`) || strings.Contains(doneColumn, `/tasks/write-brief/`) {
-		t.Fatalf("workflow controls do not match task state; todo: %s; in progress: %s; done: %s", todoColumn, inProgressColumn, doneColumn)
+
+	// Every column is a drop target and every card can be picked up and opened.
+	for _, column := range []string{todoColumn, inProgressColumn, doneColumn} {
+		if !strings.Contains(column, `class="column-task-list"`) || !strings.Contains(column, `data-dropzone`) {
+			t.Fatalf("column is not a drop target: %s", column)
+		}
+	}
+	if !strings.Contains(todoColumn, `data-task-id="plan-launch"`) || !strings.Contains(todoColumn, `draggable="true"`) {
+		t.Fatalf("todo card is not draggable: %s", todoColumn)
+	}
+	if !strings.Contains(todoColumn, `href="/plan-launch"`) {
+		t.Fatalf("todo card does not link to its detail page: %s", todoColumn)
+	}
+	// Cards are previews: the board offers moves, not the full detail controls.
+	if !strings.Contains(todoColumn, `action="/tasks/plan-launch/move"`) {
+		t.Fatalf("todo card has no move control: %s", todoColumn)
+	}
+	if strings.Contains(body, `enctype="multipart/form-data"`) {
+		t.Fatalf("board renders detail-only upload controls; body: %s", body)
 	}
 }
 
-func TestCreateCompleteAndUploadFile(t *testing.T) {
+func TestMoveTaskAcrossAndWithinColumns(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "first", "second", "third")
+	for _, title := range []string{"First", "Second", "Third"} {
+		if _, err := service.Create(context.Background(), task.CreateInput{Title: title}); err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+	}
+	cookie, csrf := login(t, handler)
+
+	move := postForm(handler, "/tasks/second/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusInProgress)}, "index": {"0"},
+	}, cookie)
+	if move.Code != http.StatusSeeOther {
+		t.Fatalf("move status = %d; body: %s", move.Code, move.Body.String())
+	}
+	moved, err := service.Get(context.Background(), "second")
+	if err != nil || moved.Status != task.StatusInProgress {
+		t.Fatalf("moved task = %#v, %v", moved, err)
+	}
+
+	// Reordering inside a column is the same request with a different index.
+	if response := postForm(handler, "/tasks/first/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusTodo)}, "index": {"0"},
+	}, cookie); response.Code != http.StatusSeeOther {
+		t.Fatalf("reorder status = %d; body: %s", response.Code, response.Body.String())
+	}
+	if got, want := boardOrder(t, service, task.StatusTodo), []string{"first", "third"}; !slices.Equal(got, want) {
+		t.Fatalf("todo column = %v, want %v", got, want)
+	}
+
+	// Done work can be dragged back out again.
+	if response := postForm(handler, "/tasks/second/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusDone)},
+	}, cookie); response.Code != http.StatusSeeOther {
+		t.Fatalf("complete status = %d; body: %s", response.Code, response.Body.String())
+	}
+	if response := postForm(handler, "/tasks/second/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusTodo)}, "index": {"1"},
+	}, cookie); response.Code != http.StatusSeeOther {
+		t.Fatalf("reopen status = %d; body: %s", response.Code, response.Body.String())
+	}
+	if got, want := boardOrder(t, service, task.StatusTodo), []string{"first", "second", "third"}; !slices.Equal(got, want) {
+		t.Fatalf("todo column after reopen = %v, want %v", got, want)
+	}
+}
+
+func TestMoveTaskAnswersDragAndDropWithJSON(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "drag-me")
+	if _, err := service.Create(context.Background(), task.CreateInput{Title: "Drag me"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cookie, csrf := login(t, handler)
+
+	request := httptest.NewRequest(http.MethodPost, "/tasks/drag-me/move",
+		strings.NewReader(url.Values{"csrf": {csrf}, "status": {"in_progress"}, "index": {"0"}}.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("json move status = %d; body: %s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("json move content type = %q", contentType)
+	}
+	var payload struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Card   string `json:"card"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json move response: %v; body: %s", err, response.Body.String())
+	}
+	if payload.ID != "drag-me" || payload.Status != "in_progress" {
+		t.Fatalf("json move payload = %#v", payload)
+	}
+	// The refreshed card lets the board swap in server-rendered markup.
+	if !strings.Contains(payload.Card, `data-task-id="drag-me"`) || !strings.Contains(payload.Card, "Drag me") {
+		t.Fatalf("json move card = %q", payload.Card)
+	}
+}
+
+func TestMoveTaskRejectsInvalidRequests(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "prerequisite", "blocked")
+	if _, err := service.Create(context.Background(), task.CreateInput{Title: "Prerequisite"}); err != nil {
+		t.Fatalf("create prerequisite: %v", err)
+	}
+	if _, err := service.Create(context.Background(), task.CreateInput{
+		Title: "Blocked", Dependencies: []string{"prerequisite"},
+	}); err != nil {
+		t.Fatalf("create blocked task: %v", err)
+	}
+	cookie, csrf := login(t, handler)
+
+	for name, expectation := range map[string]struct {
+		values url.Values
+		status int
+	}{
+		"missing csrf":   {url.Values{"status": {"done"}}, http.StatusForbidden},
+		"unknown status": {url.Values{"csrf": {csrf}, "status": {"archived"}}, http.StatusBadRequest},
+		"blocked":        {url.Values{"csrf": {csrf}, "status": {"done"}}, http.StatusConflict},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := postForm(handler, "/tasks/blocked/move", expectation.values, cookie)
+			if response.Code != expectation.status {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, expectation.status, response.Body.String())
+			}
+		})
+	}
+	unchanged, err := service.Get(context.Background(), "blocked")
+	if err != nil || unchanged.Status != task.StatusTodo {
+		t.Fatalf("task after rejected moves = %#v, %v", unchanged, err)
+	}
+}
+
+func TestTaskDetailServesADrawerFragment(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "detail-me")
+	if _, err := service.Create(context.Background(), task.CreateInput{
+		Title: "Detail me", Description: "Full **detail** here.",
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cookie, _ := login(t, handler)
+
+	page := get(t, handler, "/detail-me", cookie)
+	if body := page.Body.String(); !strings.Contains(body, "<!doctype html>") || !strings.Contains(body, "<strong>detail</strong>") {
+		t.Fatalf("detail page is not a full page with rendered Markdown; body: %s", body)
+	}
+	fragment := get(t, handler, "/detail-me?partial=1", cookie)
+	if fragment.Code != http.StatusOK {
+		t.Fatalf("fragment status = %d; body: %s", fragment.Code, fragment.Body.String())
+	}
+	body := fragment.Body.String()
+	if strings.Contains(body, "<!doctype html>") || strings.Contains(body, "<body") {
+		t.Fatalf("fragment is a full page; body: %s", body)
+	}
+	if !strings.Contains(body, `data-task-id="detail-me"`) || !strings.Contains(body, "<strong>detail</strong>") {
+		t.Fatalf("fragment does not contain the task detail; body: %s", body)
+	}
+	if !strings.Contains(body, `enctype="multipart/form-data"`) {
+		t.Fatalf("fragment does not offer image upload; body: %s", body)
+	}
+}
+
+func TestBoardScriptAndStylesAreServed(t *testing.T) {
+	t.Parallel()
+
+	handler, _ := testHandler(t)
+	for path, wantType := range map[string]string{
+		"/static/app.css": "text/css",
+		"/static/app.js":  "text/javascript",
+	} {
+		response := get(t, handler, path, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", path, response.Code)
+		}
+		if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, wantType) {
+			t.Fatalf("%s content type = %q, want %q", path, contentType, wantType)
+		}
+		if response.Body.Len() == 0 {
+			t.Fatalf("%s served an empty body", path)
+		}
+	}
+}
+
+func TestCreateMoveAndUploadFile(t *testing.T) {
 	t.Parallel()
 
 	handler, service := testHandler(t)
@@ -233,7 +422,9 @@ func TestCreateCompleteAndUploadFile(t *testing.T) {
 	}
 	created := items[0]
 
-	start := postForm(handler, "/tasks/"+created.ID+"/start", url.Values{"csrf": {csrf}}, cookie)
+	start := postForm(handler, "/tasks/"+created.ID+"/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusInProgress)},
+	}, cookie)
 	if start.Code != http.StatusSeeOther {
 		t.Fatalf("start status = %d; body: %s", start.Code, start.Body.String())
 	}
@@ -273,37 +464,32 @@ func TestCreateCompleteAndUploadFile(t *testing.T) {
 		t.Fatalf("attachment = %#v", attachment)
 	}
 
-	downloadRequest := httptest.NewRequest(http.MethodGet, "/attachments/"+attachment.Key, nil)
-	downloadRequest.AddCookie(cookie)
-	downloadResponse := httptest.NewRecorder()
-	handler.ServeHTTP(downloadResponse, downloadRequest)
-	if downloadResponse.Code != http.StatusOK {
-		t.Fatalf("download status = %d; body: %s", downloadResponse.Code, downloadResponse.Body.String())
+	download := get(t, handler, "/attachments/"+attachment.Key, cookie)
+	if download.Code != http.StatusOK {
+		t.Fatalf("download status = %d; body: %s", download.Code, download.Body.String())
 	}
-	if got := downloadResponse.Header().Get("Content-Type"); got != "application/pdf" {
+	if got := download.Header().Get("Content-Type"); got != "application/pdf" {
 		t.Errorf("download content type = %q, want application/pdf", got)
 	}
-	if got := downloadResponse.Header().Get("Content-Disposition"); got != "attachment" {
+	if got := download.Header().Get("Content-Disposition"); got != "attachment" {
 		t.Errorf("download content disposition = %q, want attachment", got)
 	}
-	if !bytes.Equal(downloadResponse.Body.Bytes(), contents) {
-		t.Errorf("download contents = %q, want %q", downloadResponse.Body.Bytes(), contents)
+	if !bytes.Equal(download.Body.Bytes(), contents) {
+		t.Errorf("download contents = %q, want %q", download.Body.Bytes(), contents)
 	}
 
-	pageRequest := httptest.NewRequest(http.MethodGet, "/"+created.ID, nil)
-	pageRequest.AddCookie(cookie)
-	pageResponse := httptest.NewRecorder()
-	handler.ServeHTTP(pageResponse, pageRequest)
-	pageBody := pageResponse.Body.String()
-	if !strings.Contains(pageBody, `href="/attachments/`+attachment.Key+`"`) ||
-		!strings.Contains(pageBody, `download="release-notes.pdf"`) {
-		t.Errorf("task page does not render a downloadable file attachment; body: %s", pageBody)
+	detail := get(t, handler, "/"+created.ID, cookie).Body.String()
+	if !strings.Contains(detail, `href="/attachments/`+attachment.Key+`"`) ||
+		!strings.Contains(detail, `download="release-notes.pdf"`) {
+		t.Errorf("task detail does not render a downloadable file attachment; body: %s", detail)
 	}
-	if !strings.Contains(pageBody, "Attach a file") || strings.Contains(pageBody, `accept="image/*"`) {
-		t.Errorf("task page still restricts uploads to images; body: %s", pageBody)
+	if !strings.Contains(detail, "Attach a file") || strings.Contains(detail, `accept="image/*"`) {
+		t.Errorf("task detail still restricts uploads to images; body: %s", detail)
 	}
 
-	complete := postForm(handler, "/tasks/"+created.ID+"/done", url.Values{"csrf": {csrf}}, cookie)
+	complete := postForm(handler, "/tasks/"+created.ID+"/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusDone)},
+	}, cookie)
 	if complete.Code != http.StatusSeeOther {
 		t.Fatalf("complete status = %d; body: %s", complete.Code, complete.Body.String())
 	}
@@ -352,6 +538,52 @@ func TestUploadAllowsFilesLargerThanTenMiB(t *testing.T) {
 	}
 }
 
+func TestFileUploadAnswersTheDrawerWithARefreshedCard(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "shoot-me")
+	if _, err := service.Create(context.Background(), task.CreateInput{Title: "Shoot me"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cookie, csrf := login(t, handler)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("csrf", csrf); err != nil {
+		t.Fatalf("write csrf: %v", err)
+	}
+	file, err := writer.CreateFormFile("file", "shot.png")
+	if err != nil {
+		t.Fatalf("create image part: %v", err)
+	}
+	if _, err := file.Write([]byte("\x89PNG\r\n\x1a\nimage")); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/tasks/shoot-me/attachments", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Accept", "application/json")
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("upload status = %d; body: %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		ID   string `json:"id"`
+		Card string `json:"card"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode upload response: %v; body: %s", err, response.Body.String())
+	}
+	// The refreshed card carries the new image count and cover thumbnail.
+	if payload.ID != "shoot-me" || !strings.Contains(payload.Card, "1 file") || !strings.Contains(payload.Card, "card-cover") {
+		t.Fatalf("upload response card = %q", payload.Card)
+	}
+}
+
 func TestTaskMutationsCarryWebAuditAttribution(t *testing.T) {
 	t.Parallel()
 
@@ -371,7 +603,9 @@ func TestTaskMutationsCarryWebAuditAttribution(t *testing.T) {
 	if create.Code != http.StatusSeeOther {
 		t.Fatalf("create status = %d; body: %s", create.Code, create.Body.String())
 	}
-	start := postForm(handler, "/tasks/web-audit/start", url.Values{"csrf": {csrf}}, cookie)
+	start := postForm(handler, "/tasks/web-audit/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusInProgress)},
+	}, cookie)
 	if start.Code != http.StatusSeeOther {
 		t.Fatalf("start status = %d; body: %s", start.Code, start.Body.String())
 	}
@@ -380,7 +614,7 @@ func TestTaskMutationsCarryWebAuditAttribution(t *testing.T) {
 	if err := writer.WriteField("csrf", csrf); err != nil {
 		t.Fatalf("write csrf: %v", err)
 	}
-	file, err := writer.CreateFormFile("image", "audit.png")
+	file, err := writer.CreateFormFile("file", "audit.png")
 	if err != nil {
 		t.Fatalf("create image form part: %v", err)
 	}
@@ -390,7 +624,7 @@ func TestTaskMutationsCarryWebAuditAttribution(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close multipart writer: %v", err)
 	}
-	uploadRequest := httptest.NewRequest(http.MethodPost, "/tasks/web-audit/images", &uploadBody)
+	uploadRequest := httptest.NewRequest(http.MethodPost, "/tasks/web-audit/attachments", &uploadBody)
 	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
 	uploadRequest.AddCookie(cookie)
 	uploadResponse := httptest.NewRecorder()
@@ -398,7 +632,9 @@ func TestTaskMutationsCarryWebAuditAttribution(t *testing.T) {
 	if uploadResponse.Code != http.StatusSeeOther {
 		t.Fatalf("upload status = %d; body: %s", uploadResponse.Code, uploadResponse.Body.String())
 	}
-	complete := postForm(handler, "/tasks/web-audit/done", url.Values{"csrf": {csrf}}, cookie)
+	complete := postForm(handler, "/tasks/web-audit/move", url.Values{
+		"csrf": {csrf}, "status": {string(task.StatusDone)},
+	}, cookie)
 	if complete.Code != http.StatusSeeOther {
 		t.Fatalf("complete status = %d; body: %s", complete.Code, complete.Body.String())
 	}
@@ -427,6 +663,47 @@ func (r *auditCapturingRepository) Create(ctx context.Context, item task.Task) e
 func (r *auditCapturingRepository) Update(ctx context.Context, item task.Task) error {
 	r.mutations = append(r.mutations, task.AuditMetadataFromContext(ctx))
 	return r.Repository.Update(ctx, item)
+}
+
+// boardHandler returns a handler over a repository tests can seed directly,
+// for board layout assertions that do not go through the service.
+func boardHandler(t *testing.T) (http.Handler, *tasktest.Repository) {
+	t.Helper()
+	root := t.TempDir()
+	repository := tasktest.NewRepository()
+	handler := New(Config{
+		Tasks:   task.NewService(repository, time.Now, func() string { return "new-task" }),
+		Reader:  repository,
+		Objects: objectstore.NewLocal(filepath.Join(root, "objects")),
+		Auth:    auth.NewServer(auth.Config{Issuer: "http://tasks.example.com", Secret: "shared-secret"}),
+	})
+	return handler, repository
+}
+
+func boardOrder(t *testing.T, service *task.Service, status task.Status) []string {
+	t.Helper()
+	items, err := service.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Status == status {
+			ids = append(ids, item.ID)
+		}
+	}
+	return ids
+}
+
+func get(t *testing.T, handler http.Handler, target string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	if cookie != nil {
+		request.AddCookie(cookie)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
 
 func testHandler(t *testing.T) (http.Handler, *task.Service) {
@@ -496,4 +773,29 @@ func findKanbanColumn(t *testing.T, body string, status task.Status) string {
 		t.Fatalf("kanban column %q not found in body: %s", status, body)
 	}
 	return column
+}
+
+func TestExcerptFlattensMarkdownForCards(t *testing.T) {
+	t.Parallel()
+
+	for name, expectation := range map[string]struct{ source, want string }{
+		"headings and emphasis": {"## Plan\n\nShip **fast**", "Plan Ship fast"},
+		"task list":             {"- [x] first step\n- [ ] second step", "first step second step"},
+		"links":                 {"see [the docs](https://example.com)", "see the docs"},
+		"images":                {"![a diagram](/images/x.png) after", "after"},
+		"fenced code":           {"before\n\n```go\nfmt.Println(1)\n```\n\nafter", "before after"},
+		"raw html":              {"<script>alert(1)</script>keep", "alert(1) keep"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := excerpt(expectation.source); got != expectation.want {
+				t.Fatalf("excerpt(%q) = %q, want %q", expectation.source, got, expectation.want)
+			}
+		})
+	}
+
+	long := strings.Repeat("word ", 100)
+	shortened := excerpt(long)
+	if !strings.HasSuffix(shortened, "…") || len([]rune(shortened)) > excerptLimit+1 {
+		t.Fatalf("excerpt did not truncate a long description: %q", shortened)
+	}
 }

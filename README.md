@@ -3,10 +3,10 @@
 A small, self-hosted task manager with one shared Go backend and three interfaces:
 
 - a `tasks` CLI;
-- a secret-protected three-column kanban web UI; and
+- a secret-protected, drag-and-drop kanban web UI; and
 - an OAuth-protected MCP server over Streamable HTTP.
 
-Tasks live in PostgreSQL as the single source of truth. Every user-facing read goes through read-only SQL against those tables, while create/edit/start/complete operations go through the shared task service. Every successful mutation also appends an immutable before/after revision in the same database transaction.
+Tasks live in PostgreSQL as the single source of truth. Every user-facing read goes through read-only SQL against those tables, while create/edit/start/move/complete operations go through the shared task service. Every successful mutation also appends an immutable before/after revision in the same database transaction.
 
 ## Quick start
 
@@ -51,7 +51,16 @@ cat notes.md | tasks edit --description-file - <task-id>
 tasks edit --depends-on prerequisite-id,other-id <task-id>
 ```
 
-The web homepage groups tasks into **To do**, **In progress**, and **Done**. Starting a task moves it into progress; completing it moves it to done.
+## Web board
+
+The homepage is a three-column board of **To do**, **In progress**, and **Done**.
+
+- Drag a card to another column to change its status, or within a column to set its order by hand. Both are saved immediately, and a card dropped into **Done** ahead of its dependencies snaps back with the reason.
+- Cards are previews: title, a plain-text slice of the description, dependency and file counts, and a cover thumbnail of the first image. Click one for the full task in a slide-over panel; the URL follows, so the panel is shareable and the back button closes it.
+- Every drag has a pointer-free equivalent. The `⋯` menu on each card moves it between columns, and focusing a card and holding `⌘`/`Ctrl` with the arrow keys moves it left, right, up, or down.
+- Without JavaScript the same board renders, the `⋯` menu posts an ordinary form, and cards open a full detail page. File attachments live on that detail view, images previewed inline and everything else as a download.
+
+Column order lives in `tasks.position`, a float that is halved between neighbors on each move so a drag writes one row. Tasks stored before the board could be reordered are spread out once, newest first, the first time the upgraded server opens the database.
 
 ```sh
 tasks query 'SELECT id, status, blocked, title FROM task_overview ORDER BY created_at DESC'
@@ -83,7 +92,7 @@ ORDER BY table_name, ordinal_position;
 
 Each read runs inside a PostgreSQL `READ ONLY` transaction; the CLI and MCP layers also reject statements that do not begin with `SELECT`, `WITH`, or `EXPLAIN`. The intentionally small schema is:
 
-- `tasks(id, title, description, status, created_at, updated_at, version)`, where status is `todo`, `in_progress`, or `done`
+- `tasks(id, title, description, status, position, created_at, updated_at, version)`, where status is `todo`, `in_progress`, or `done` and `position` orders a column top to bottom
 - `dependencies(task_id, depends_on_id)`
 - `images(task_id, object_key, name, content_type)`
 - `task_revisions(revision_id, task_id, version, action, actor_kind, actor_id, source, request_id, occurred_at, before_state, after_state, metadata)`
@@ -93,7 +102,7 @@ Each read runs inside a PostgreSQL `READ ONLY` transaction; the CLI and MCP laye
 
 ## Revision history
 
-`task_revisions` is an append-only, Git-like history of successful task changes. Creating, editing, starting, completing, or attaching an image updates the current task and records one revision atomically. A failed or blocked operation records nothing, and edits that produce no change or repeated completion on an already-done task are no-ops.
+`task_revisions` is an append-only, Git-like history of successful task changes. Creating, editing, starting, completing, reopening, reordering, or attaching a file updates the current task and records one revision atomically, under the action `create`, `edit`, `start`, `complete`, `reopen`, `reorder`, or `add_attachment`. A failed or blocked operation records nothing; edits that produce no change, repeated completion on an already-done task, and dropping a card back where it came from are all no-ops. The rare `rebalance` action appears when a column's positions can no longer be split and are spread back out.
 
 Each revision contains:
 

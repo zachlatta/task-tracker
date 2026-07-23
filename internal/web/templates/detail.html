@@ -1,0 +1,14 @@
+{{define "detail.html"}}<!doctype html>
+<html lang="en">
+{{template "document-head" .DetailTask.Title}}
+<body class="detail-page" data-csrf="{{.CSRF}}">
+  {{template "site-header" .}}
+  <main>
+    {{with .Message}}<p class="notice" role="status">{{.}}</p>{{end}}
+    <p class="crumbs"><a class="back-link" href="/">All tasks</a></p>
+    {{template "task-detail" .DetailTask}}
+  </main>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>{{end}}

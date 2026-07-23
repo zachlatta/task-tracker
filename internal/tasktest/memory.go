@@ -63,8 +63,9 @@ func (r *Repository) List(_ context.Context) ([]task.Task, error) {
 	return items, nil
 }
 
-// Tasks returns every task ordered by workflow state then newest-first,
-// mirroring the fixed projection the web UI reads through in production.
+// Tasks returns every task ordered by workflow state, then by board position
+// with newest-first as the tiebreak, mirroring the fixed projection the web UI
+// reads through in production.
 func (r *Repository) Tasks(ctx context.Context) ([]task.Task, error) {
 	items, err := r.List(ctx)
 	if err != nil {
@@ -74,7 +75,13 @@ func (r *Repository) Tasks(ctx context.Context) ([]task.Task, error) {
 		if items[i].Status != items[j].Status {
 			return statusOrder(items[i].Status) < statusOrder(items[j].Status)
 		}
-		return items[i].CreatedAt.After(items[j].CreatedAt)
+		if items[i].Position != items[j].Position {
+			return items[i].Position < items[j].Position
+		}
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.After(items[j].CreatedAt)
+		}
+		return items[i].ID < items[j].ID
 	})
 	return items, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -807,4 +808,134 @@ func TestDeleteExpiredAuthState(t *testing.T) {
 	if _, _, ok, _ := store.Session(ctx, "new-sess"); !ok {
 		t.Fatal("valid session removed by cleanup")
 	}
+}
+
+func TestStorePersistsBoardOrderAcrossMoves(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	ids := []string{"first", "second", "third"}
+	service := task.NewService(store, func() time.Time {
+		now = now.Add(time.Minute)
+		return now
+	}, func() string {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	})
+	for _, title := range []string{"First", "Second", "Third"} {
+		if _, err := service.Create(ctx, task.CreateInput{Title: title}); err != nil {
+			t.Fatalf("Create %q: %v", title, err)
+		}
+	}
+	// New tasks stack up newest first: third, second, first.
+	if got, want := storedOrder(t, store, task.StatusTodo), []string{"third", "second", "first"}; !slices.Equal(got, want) {
+		t.Fatalf("todo column = %v, want %v", got, want)
+	}
+
+	if _, err := service.Move(ctx, "first", task.StatusTodo, 0); err != nil {
+		t.Fatalf("Move within column: %v", err)
+	}
+	if got, want := storedOrder(t, store, task.StatusTodo), []string{"first", "third", "second"}; !slices.Equal(got, want) {
+		t.Fatalf("todo column after reorder = %v, want %v", got, want)
+	}
+
+	if _, err := service.Move(ctx, "second", task.StatusInProgress, 0); err != nil {
+		t.Fatalf("Move across columns: %v", err)
+	}
+	if _, err := service.Move(ctx, "third", task.StatusInProgress, 0); err != nil {
+		t.Fatalf("Move across columns: %v", err)
+	}
+	if got, want := storedOrder(t, store, task.StatusInProgress), []string{"third", "second"}; !slices.Equal(got, want) {
+		t.Fatalf("in-progress column = %v, want %v", got, want)
+	}
+
+	// Reordering and reopening are recorded as their own revision actions.
+	if _, err := service.Complete(ctx, "second"); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if _, err := service.Move(ctx, "second", task.StatusTodo, 0); err != nil {
+		t.Fatalf("Move out of done: %v", err)
+	}
+	result, err := store.Query(ctx, `SELECT action FROM task_revisions WHERE task_id = 'second' ORDER BY version`)
+	if err != nil {
+		t.Fatalf("query revisions: %v", err)
+	}
+	var actions []string
+	for _, row := range result.Rows {
+		actions = append(actions, fmt.Sprint(row["action"]))
+	}
+	if want := []string{"create", "start", "complete", "reopen"}; !slices.Equal(actions, want) {
+		t.Fatalf("revision actions = %v, want %v", actions, want)
+	}
+}
+
+func TestOpenBackfillsBoardPositionsForExistingTasks(t *testing.T) {
+	databaseURL := pgtest.URL(t)
+	ctx := context.Background()
+	connection, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect legacy database: %v", err)
+	}
+	_, err = connection.Exec(ctx, `
+		CREATE TABLE tasks (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			version BIGINT NOT NULL DEFAULT 1
+		);
+		INSERT INTO tasks (id, title, description, status, created_at, updated_at)
+		VALUES
+			('oldest', 'Oldest', '', 'todo', now() - interval '2 hours', now()),
+			('newest', 'Newest', '', 'todo', now(), now()),
+			('middle', 'Middle', '', 'todo', now() - interval '1 hour', now()),
+			('finished', 'Finished', '', 'done', now() - interval '3 hours', now());
+	`)
+	connection.Close(ctx)
+	if err != nil {
+		t.Fatalf("seed legacy tasks: %v", err)
+	}
+
+	store, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	if got, want := storedOrder(t, store, task.StatusTodo), []string{"newest", "middle", "oldest"}; !slices.Equal(got, want) {
+		t.Fatalf("backfilled todo column = %v, want %v", got, want)
+	}
+	result, err := store.Query(ctx, `SELECT count(DISTINCT position) AS distinct_positions FROM tasks WHERE status = 'todo'`)
+	if err != nil {
+		t.Fatalf("query positions: %v", err)
+	}
+	if got := fmt.Sprint(result.Rows[0]["distinct_positions"]); got != "3" {
+		t.Fatalf("distinct todo positions = %s, want 3", got)
+	}
+	service := task.NewService(store, time.Now, func() string { return "unused" })
+	if _, err := service.Move(ctx, "oldest", task.StatusTodo, 1); err != nil {
+		t.Fatalf("Move after backfill: %v", err)
+	}
+	if got, want := storedOrder(t, store, task.StatusTodo), []string{"newest", "oldest", "middle"}; !slices.Equal(got, want) {
+		t.Fatalf("todo column after move = %v, want %v", got, want)
+	}
+}
+
+// storedOrder reads one column back through the projection the board renders.
+func storedOrder(t *testing.T, store *Store, status task.Status) []string {
+	t.Helper()
+	items, err := store.Tasks(context.Background())
+	if err != nil {
+		t.Fatalf("Tasks: %v", err)
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Status == status {
+			ids = append(ids, item.ID)
+		}
+	}
+	return ids
 }
