@@ -2,14 +2,88 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/zachlatta/tasks/internal/pgtest"
 )
 
 func TestCLIAddQueryAndComplete(t *testing.T) {
-	t.Setenv("TASKS_DATABASE_URL", pgtest.URL(t))
+	const secret = "test-secret"
+	var title string
+	var description string
+	var version int64
+	var status string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+secret {
+			t.Errorf("Authorization = %q", got)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tools/create_task":
+			var input struct {
+				Title       string `json:"title"`
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Errorf("decode create input: %v", err)
+			}
+			title, description, version, status = input.Title, input.Description, 1, "todo"
+			_, _ = io.WriteString(w, `{"data":{"id":"test-task","version":1}}`)
+		case "/api/tools/update_task":
+			var input struct {
+				ID              string  `json:"id"`
+				Title           *string `json:"title"`
+				Description     *string `json:"description"`
+				ExpectedVersion *int64  `json:"expected_version"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Errorf("decode update input: %v", err)
+			}
+			if input.ID != "test-task" || input.ExpectedVersion == nil || *input.ExpectedVersion != version {
+				t.Errorf("update input = %#v; current version = %d", input, version)
+			}
+			title, description, version = *input.Title, *input.Description, version+1
+			_, _ = io.WriteString(w, `{"data":{"id":"test-task","version":2}}`)
+		case "/api/tools/query_tasks_sql":
+			var input struct {
+				SQL string `json:"sql"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Errorf("decode query input: %v", err)
+			}
+			if strings.Contains(input.SQL, "task_revisions") {
+				_, _ = io.WriteString(w, `{"data":{"columns":["action","actor_kind","source"],"rows":[`+
+					`{"action":"create","actor_kind":"shared_secret","source":"cli"},`+
+					`{"action":"edit","actor_kind":"shared_secret","source":"cli"},`+
+					`{"action":"complete","actor_kind":"shared_secret","source":"cli"}],"truncated":false}}`)
+				return
+			}
+			row, err := json.Marshal(map[string]any{
+				"id": "test-task", "status": status, "title": title, "description": description, "version": version,
+			})
+			if err != nil {
+				t.Errorf("encode query row: %v", err)
+			}
+			_, _ = io.WriteString(w, `{"data":{"columns":["id","status","title","description","version"],"rows":[`+string(row)+`],"truncated":false}}`)
+		case "/api/tools/complete_task":
+			status = "done"
+			version++
+			_, _ = io.WriteString(w, `{"data":{"id":"test-task","status":"done","version":3}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("TASKS_API_URL", server.URL)
+	t.Setenv("TASKS_SECRET", secret)
+	t.Setenv("TASKS_DATABASE_URL", "")
+
 	var output bytes.Buffer
 	var errors bytes.Buffer
 	if code := run([]string{"add", "--description", "Old description", "Test the CLI"}, strings.NewReader(""), &output, &errors); code != 0 {
@@ -69,7 +143,7 @@ func TestCLIAddQueryAndComplete(t *testing.T) {
 	if !strings.Contains(history, `"action": "create"`) ||
 		!strings.Contains(history, `"action": "edit"`) ||
 		!strings.Contains(history, `"action": "complete"`) ||
-		!strings.Contains(history, `"actor_kind": "local_user"`) ||
+		!strings.Contains(history, `"actor_kind": "shared_secret"`) ||
 		!strings.Contains(history, `"source": "cli"`) {
 		t.Fatalf("history query output = %q", history)
 	}
@@ -88,7 +162,19 @@ func TestCLIHasNoListCommand(t *testing.T) {
 }
 
 func TestCLIQueryRejectsWrites(t *testing.T) {
-	t.Setenv("TASKS_DATABASE_URL", pgtest.URL(t))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tools/query_tasks_sql" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"tool_error","message":"only read-only queries are allowed"}}`)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("TASKS_API_URL", server.URL)
+	t.Setenv("TASKS_SECRET", "test-secret")
+	t.Setenv("TASKS_DATABASE_URL", "")
+
 	var output bytes.Buffer
 	var errors bytes.Buffer
 	if code := run([]string{"query", "DELETE FROM tasks"}, strings.NewReader(""), &output, &errors); code != 1 {
@@ -111,18 +197,41 @@ func TestCLIRejectsMissingCommand(t *testing.T) {
 }
 
 func TestCLIUsesTasksConfigurationName(t *testing.T) {
+	t.Setenv("TASKS_API_URL", "")
+	t.Setenv("TASKS_SECRET", "")
+	t.Setenv("TASKS_DATABASE_URL", "postgres://must-not-be-used.example/tasks")
 	var output bytes.Buffer
 	var errors bytes.Buffer
 	if code := run([]string{"add", "a task"}, strings.NewReader(""), &output, &errors); code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if !strings.Contains(errors.String(), "TASKS_DATABASE_URL is required") {
+	if !strings.Contains(errors.String(), "TASKS_API_URL is required") {
+		t.Fatalf("stderr = %q", errors.String())
+	}
+}
+
+func TestCLIRequiresSharedSecretInsteadOfDatabaseCredentials(t *testing.T) {
+	t.Setenv("TASKS_API_URL", "http://127.0.0.1:8080")
+	t.Setenv("TASKS_SECRET", "")
+	t.Setenv("TASKS_DATABASE_URL", "postgres://must-not-be-used.example/tasks")
+	var output bytes.Buffer
+	var errors bytes.Buffer
+	if code := run([]string{"add", "a task"}, strings.NewReader(""), &output, &errors); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errors.String(), "TASKS_SECRET is required") {
 		t.Fatalf("stderr = %q", errors.String())
 	}
 }
 
 func TestCLIEditRejectsConflictingDescriptionInputs(t *testing.T) {
-	t.Setenv("TASKS_DATABASE_URL", pgtest.URL(t))
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("API must not be called for invalid CLI arguments")
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("TASKS_API_URL", server.URL)
+	t.Setenv("TASKS_SECRET", "test-secret")
+	t.Setenv("TASKS_DATABASE_URL", "")
 	var output bytes.Buffer
 	var errors bytes.Buffer
 	code := run([]string{

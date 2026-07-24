@@ -156,6 +156,22 @@ func (s *Server) RequireBearer(next http.Handler) http.Handler {
 	})
 }
 
+// RequireSharedSecretBearer protects non-browser HTTP clients with the same
+// shared secret used by the web login and to authorize MCP OAuth clients.
+// Unlike RequireBearer, the credential is the shared secret itself rather
+// than an OAuth access token.
+func (s *Server) RequireSharedSecretBearer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme, credential, found := strings.Cut(r.Header.Get("Authorization"), " ")
+		if !found || !strings.EqualFold(scheme, "Bearer") || credential == "" || !s.CheckSecret(credential) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="tasks-api"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) ValidToken(ctx context.Context, value string) bool {
 	_, ok := s.validToken(ctx, value)
 	return ok

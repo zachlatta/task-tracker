@@ -20,14 +20,17 @@ cp .env.example .env
 docker run -d --name tasks-pg -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=tasks -p 5432:5432 postgres:16-alpine
 
+# Start the API, web UI, and MCP server:
+go run ./cmd/tasks serve
+
+# In another shell, the CLI uses TASKS_API_URL and TASKS_SECRET:
 go run ./cmd/tasks add "Write the first task"
 go run ./cmd/tasks query 'SELECT id, status, title FROM task_overview'
-go run ./cmd/tasks serve
 ```
 
 Open <http://127.0.0.1:8080> and enter the same `TASKS_SECRET` from `.env`.
 
-The schema (`tasks`, `dependencies`, `images`, and the `task_overview` view) is created automatically on first connection. `TASKS_DATABASE_URL` is required by every command, not just `serve`.
+The server creates the schema (`tasks`, `dependencies`, `images`, and the `task_overview` view) automatically on first connection. Only `tasks serve` connects to PostgreSQL. Other CLI commands call `TASKS_API_URL` with the same `TASKS_SECRET` used by the web and MCP authorization flow.
 
 ## CLI
 
@@ -40,7 +43,7 @@ tasks serve
 tasks version
 ```
 
-The CLI has no `list` or `show` shortcut. Every user-facing read goes through read-only SQL and is returned as structured JSON. The web UI uses fixed SQL against the same projection, while mutations from every interface still go through `internal/task.Service`.
+The CLI has no `list` or `show` shortcut. Every user-facing read goes through read-only SQL on the server and is returned as structured JSON. The web UI uses fixed SQL against the same projection, while mutations from every interface still go through `internal/task.Service`. The CLI never receives or opens `TASKS_DATABASE_URL`.
 
 `tasks edit` replaces only the fields named by flags. Use `--description-file` for longer Markdown; `-` reads it from stdin. Passing an empty `--description` clears the description, and an empty `--depends-on` clears all dependencies. `--expected-version` is optional optimistic concurrency protection for scripts that first read a task.
 
@@ -50,6 +53,19 @@ tasks edit --description-file notes.md --expected-version 3 <task-id>
 cat notes.md | tasks edit --description-file - <task-id>
 tasks edit --depends-on prerequisite-id,other-id <task-id>
 ```
+
+## HTTP API
+
+The CLI calls `POST /api/tools/{name}` with `Authorization: Bearer <TASKS_SECRET>`. The available names mirror MCP: `query_tasks_sql`, `create_task`, `edit_task_text`, `update_task`, and `complete_task`. Inputs and successful `data` values use the same JSON types as the corresponding MCP tools:
+
+```sh
+curl -sS https://your-host.example/api/tools/create_task \
+  -H "Authorization: Bearer $TASKS_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Created through the API"}'
+```
+
+Successful responses use `{"data": ...}`. Errors use `{"error":{"code":"...","message":"..."}}`. The API and MCP transports share one transport-neutral implementation, so validation and task behavior stay identical.
 
 ## Web board
 
@@ -90,7 +106,7 @@ WHERE table_schema = 'public'
 ORDER BY table_name, ordinal_position;
 ```
 
-Each read runs inside a PostgreSQL `READ ONLY` transaction; the CLI and MCP layers also reject statements that do not begin with `SELECT`, `WITH`, or `EXPLAIN`. The intentionally small schema is:
+Each read runs inside a PostgreSQL `READ ONLY` transaction; the HTTP API and MCP layers also reject statements that do not begin with `SELECT`, `WITH`, or `EXPLAIN`. The intentionally small schema is:
 
 - `tasks(id, title, description, status, position, created_at, updated_at, version)`, where status is `todo`, `in_progress`, or `done` and `position` orders a column top to bottom
 - `dependencies(task_id, depends_on_id)`
@@ -113,7 +129,7 @@ Each revision contains:
 
 The first revision has a null `before_state`. Existing tasks receive a version-one `import` baseline when the upgraded server first opens their database; changes made before that baseline cannot be reconstructed. Revision rows reject update, delete, and truncate operations. Task versions also prevent a stale writer from silently overwriting a newer mutation.
 
-The web UI uses one shared secret, so its revisions identify the web/shared-secret surface rather than an individual person. MCP revisions include the authenticated OAuth client ID. CLI revisions identify the local CLI but do not collect the operating-system username.
+The web UI and CLI use one shared secret, so their revisions identify the corresponding web or CLI shared-secret surface rather than an individual person. MCP revisions include the authenticated OAuth client ID.
 
 Revision snapshots retain old task text and attachment metadata intentionally. They do not copy file bytes; preserving deleted or replaced file content requires object-store versioning or retention.
 
@@ -125,8 +141,9 @@ The process reads `.env` when it starts. Existing environment variables take pre
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TASKS_SECRET` | required for `serve` | Shared secret used by web login and OAuth authorization |
-| `TASKS_DATABASE_URL` | required for all commands | PostgreSQL connection string for task storage |
+| `TASKS_SECRET` | required for server and CLI | Shared secret used by CLI API auth, web login, and OAuth authorization |
+| `TASKS_API_URL` | required for CLI commands | Base URL of the task server; remote URLs must use HTTPS |
+| `TASKS_DATABASE_URL` | required for `serve` | PostgreSQL connection string for task and auth storage |
 | `TASKS_ADDR` | `127.0.0.1:8080` | HTTP listen address |
 | `TASKS_PUBLIC_URL` | `https://tasks.hackclub.com` | Public OAuth issuer origin; HTTPS required off loopback |
 | `TASKS_DATA_DIR` | OS user config directory | Default parent directory for local image storage |
@@ -148,7 +165,7 @@ make test
 make build
 ```
 
-The Postgres-backed tests (storage, MCP tools, CLI) are skipped unless `TASKS_TEST_DATABASE_URL` points at a reachable server. Each test provisions and drops its own database, so point it at a throwaway instance:
+The Postgres-backed tests (storage and MCP integration) are skipped unless `TASKS_TEST_DATABASE_URL` points at a reachable server. Each test provisions and drops its own database, so point it at a throwaway instance:
 
 ```sh
 docker run -d --name tasks-test-pg -e POSTGRES_PASSWORD=postgres \
@@ -157,7 +174,7 @@ TASKS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres?ssl
   make test
 ```
 
-Tests cover the domain service, PostgreSQL persistence, read-only SQL enforcement, OAuth/PKCE, HTTP origin protection, MCP tools, CLI behavior, browser sessions, CSRF checks, and file uploads.
+Tests cover the domain service, PostgreSQL persistence, read-only SQL enforcement, shared-secret API auth, the CLI HTTP client, OAuth/PKCE, HTTP origin protection, MCP tools, CLI behavior, browser sessions, CSRF checks, and file uploads.
 
 ## Releases and Homebrew
 
@@ -179,7 +196,7 @@ The release workflows use only the repository-scoped `GITHUB_TOKEN`; no package 
 
 - PostgreSQL is the source of truth for task and authentication state, so multiple instances can share it. Production instances must also share the configured S3-compatible object store; local file storage is single-instance only.
 - The shared secret grants full task access. There are not yet per-user identities or separate read/write grants.
-- Public deployments should add reverse-proxy request throttling for the login, registration, and authorization endpoints.
+- Public deployments should add reverse-proxy request throttling for the shared-secret API, login, registration, and authorization endpoints.
 - Attachments can be any file type up to 50 MiB. Local storage is for development; production can use an existing S3-compatible bucket.
 - Task revisions cover successful domain mutations, not reads, failed login attempts, or database-administrator activity. Deployments needing forensic change capture should stream PostgreSQL changes to an external immutable destination in addition to this application history.
 - The project does not yet declare an open-source license.

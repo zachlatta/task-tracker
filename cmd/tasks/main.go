@@ -24,6 +24,7 @@ import (
 	"github.com/zachlatta/tasks/internal/objectstore"
 	"github.com/zachlatta/tasks/internal/postgres"
 	"github.com/zachlatta/tasks/internal/task"
+	"github.com/zachlatta/tasks/internal/taskapi"
 	"github.com/zachlatta/tasks/internal/web"
 )
 
@@ -46,7 +47,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		usage(stdout)
 		return 0
 	case "add", "edit", "query", "done", "serve":
-		// These commands operate on stored tasks and need the database below.
+		// These commands operate on stored tasks and need configuration below.
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		usage(stderr)
@@ -57,23 +58,26 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "configuration: %v\n", err)
 		return 1
 	}
-	if strings.TrimSpace(loaded.DatabaseURL) == "" {
-		fmt.Fprintln(stderr, "configuration: TASKS_DATABASE_URL is required")
+	if args[0] == "serve" {
+		return runServerCommand(args, loaded, stdout, stderr)
+	}
+	if strings.TrimSpace(loaded.APIURL) == "" {
+		fmt.Fprintln(stderr, "configuration: TASKS_API_URL is required")
 		return 1
 	}
-	store, err := postgres.Open(context.Background(), loaded.DatabaseURL)
+	if strings.TrimSpace(loaded.Secret) == "" {
+		fmt.Fprintln(stderr, "configuration: TASKS_SECRET is required")
+		return 1
+	}
+	client, err := taskapi.NewClient(loaded.APIURL, loaded.Secret)
 	if err != nil {
-		fmt.Fprintf(stderr, "database: %v\n", err)
+		fmt.Fprintf(stderr, "configuration: %v\n", err)
 		return 1
 	}
-	defer store.Close()
-	service := task.NewService(store, time.Now, func() string {
-		return strings.ToLower(rand.Text())
-	})
-	mutationContext := task.WithAuditMetadata(context.Background(), task.AuditMetadata{
-		ActorKind: "local_user",
-		Source:    "cli",
-	})
+	return runClientCommand(args, stdin, stdout, stderr, client)
+}
+
+func runClientCommand(args []string, stdin io.Reader, stdout, stderr io.Writer, client *taskapi.Client) int {
 	switch args[0] {
 	case "add":
 		flags := flag.NewFlagSet("add", flag.ContinueOnError)
@@ -84,7 +88,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		title := strings.Join(flags.Args(), " ")
-		created, err := service.Create(mutationContext, task.CreateInput{
+		created, err := client.CreateTask(context.Background(), taskapi.CreateTaskInput{
 			Title: title, Description: *description, Dependencies: strings.Split(*dependencies, ","),
 		})
 		if err != nil {
@@ -122,7 +126,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 
-		input := task.EditInput{}
+		input := taskapi.UpdateTaskInput{ID: flags.Args()[0]}
 		if title.set {
 			input.Title = &title.value
 		}
@@ -144,7 +148,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if expectedVersion.set {
 			input.ExpectedVersion = &expectedVersion.value
 		}
-		edited, err := service.Edit(mutationContext, flags.Args()[0], input)
+		edited, err := client.UpdateTask(context.Background(), input)
 		if err != nil {
 			fmt.Fprintf(stderr, "edit task: %v\n", err)
 			return 1
@@ -156,7 +160,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "Usage: tasks query <read-only-sql>")
 			return 2
 		}
-		result, err := store.Query(context.Background(), strings.Join(args[1:], " "))
+		result, err := client.QueryTasksSQL(context.Background(), taskapi.SQLQueryInput{
+			SQL: strings.Join(args[1:], " "),
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "query tasks: %v\n", err)
 			return 1
@@ -173,27 +179,38 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "Usage: tasks done <task-id>")
 			return 2
 		}
-		completed, err := service.Complete(mutationContext, args[1])
+		completed, err := client.CompleteTask(context.Background(), taskapi.CompleteTaskInput{ID: args[1]})
 		if err != nil {
 			fmt.Fprintf(stderr, "complete task: %v\n", err)
 			return 1
 		}
 		fmt.Fprintf(stdout, "completed %s\n", completed.ID)
 		return 0
-	case "serve":
-		if len(args) != 1 {
-			fmt.Fprintln(stderr, "Usage: tasks serve")
-			return 2
-		}
-		if err := loaded.ValidateServer(); err != nil {
-			fmt.Fprintf(stderr, "configuration: %v\n", err)
-			return 1
-		}
-		if err := serve(loaded, service, store, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "serve: %v\n", err)
-			return 1
-		}
-		return 0
+	}
+	return 0
+}
+
+func runServerCommand(args []string, loaded config.Config, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "Usage: tasks serve")
+		return 2
+	}
+	if err := loaded.ValidateServer(); err != nil {
+		fmt.Fprintf(stderr, "configuration: %v\n", err)
+		return 1
+	}
+	store, err := postgres.Open(context.Background(), loaded.DatabaseURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "database: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+	service := task.NewService(store, time.Now, func() string {
+		return strings.ToLower(rand.Text())
+	})
+	if err := serve(loaded, service, store, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return 1
 	}
 	return 0
 }
@@ -207,7 +224,14 @@ func serve(loaded config.Config, service *task.Service, store *postgres.Store, s
 	webHandler := web.New(web.Config{
 		Tasks: service, Reader: store, Objects: objects, Auth: oauthServer, SecureCookies: loaded.SecureCookies(), Sessions: store,
 	})
-	handler, err := app.NewHTTPHandler(webHandler, oauthServer, mcpserver.New(service, store, version), loaded.PublicURL)
+	tools := taskapi.NewTools(service, store)
+	handler, err := app.NewHTTPHandler(
+		webHandler,
+		oauthServer,
+		mcpserver.NewWithTools(tools, version),
+		taskapi.NewHandler(tools),
+		loaded.PublicURL,
+	)
 	if err != nil {
 		return err
 	}

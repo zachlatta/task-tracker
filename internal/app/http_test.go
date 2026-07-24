@@ -15,7 +15,10 @@ func TestHTTPHandlerExposesDiscoveryAndProtectsMCP(t *testing.T) {
 
 	oauth := auth.NewServer(auth.Config{Issuer: "https://tasks.example.com", Secret: "secret"})
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
-	handler, err := NewHTTPHandler(http.NotFoundHandler(), oauth, mcpServer, "https://tasks.example.com")
+	taskAPI := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler, err := NewHTTPHandler(http.NotFoundHandler(), oauth, mcpServer, taskAPI, "https://tasks.example.com")
 	if err != nil {
 		t.Fatalf("NewHTTPHandler: %v", err)
 	}
@@ -40,5 +43,20 @@ func TestHTTPHandlerExposesDiscoveryAndProtectsMCP(t *testing.T) {
 	handler.ServeHTTP(crossOriginResponse, crossOrigin)
 	if crossOriginResponse.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin status = %d, want %d", crossOriginResponse.Code, http.StatusForbidden)
+	}
+
+	apiRequest := httptest.NewRequest(http.MethodPost, "/api/tools/create_task", strings.NewReader(`{"title":"API task"}`))
+	apiResponse := httptest.NewRecorder()
+	handler.ServeHTTP(apiResponse, apiRequest)
+	if apiResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated API status = %d, want %d", apiResponse.Code, http.StatusUnauthorized)
+	}
+
+	apiRequest = httptest.NewRequest(http.MethodPost, "/api/tools/create_task", strings.NewReader(`{"title":"API task"}`))
+	apiRequest.Header.Set("Authorization", "Bearer secret")
+	apiResponse = httptest.NewRecorder()
+	handler.ServeHTTP(apiResponse, apiRequest)
+	if apiResponse.Code != http.StatusNoContent {
+		t.Fatalf("authenticated API status = %d, want %d; body = %s", apiResponse.Code, http.StatusNoContent, apiResponse.Body.String())
 	}
 }

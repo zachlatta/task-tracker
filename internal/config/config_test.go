@@ -34,7 +34,13 @@ func TestLoadDefaultsToHostedPublicURL(t *testing.T) {
 func TestLoadUsesEnvironmentBeforeDotEnv(t *testing.T) {
 	directory := t.TempDir()
 	dotenv := filepath.Join(directory, ".env")
-	if err := os.WriteFile(dotenv, []byte("TASKS_SECRET=from-file\nTASKS_ADDR=127.0.0.1:7000\nTASKS_DATABASE_URL=postgres://localhost:5432/tasks\nTASKS_DATA_DIR="+filepath.Join(directory, "data")+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(dotenv, []byte(
+		"TASKS_SECRET=from-file\n"+
+			"TASKS_API_URL=http://127.0.0.1:7000\n"+
+			"TASKS_ADDR=127.0.0.1:7000\n"+
+			"TASKS_DATABASE_URL=postgres://localhost:5432/tasks\n"+
+			"TASKS_DATA_DIR="+filepath.Join(directory, "data")+"\n",
+	), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
 	t.Setenv("TASKS_ADDR", "127.0.0.1:9000")
@@ -43,7 +49,9 @@ func TestLoadUsesEnvironmentBeforeDotEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if loaded.Secret != "from-file" || loaded.Address != "127.0.0.1:9000" {
+	if loaded.Secret != "from-file" ||
+		loaded.APIURL != "http://127.0.0.1:7000" ||
+		loaded.Address != "127.0.0.1:9000" {
 		t.Fatalf("config = %#v", loaded)
 	}
 	if err := loaded.ValidateServer(); err != nil {

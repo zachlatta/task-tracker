@@ -1,0 +1,275 @@
+package taskapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/zachlatta/tasks/internal/postgres"
+	"github.com/zachlatta/tasks/internal/task"
+	"github.com/zachlatta/tasks/internal/tasktest"
+)
+
+type readerFunc func(context.Context, string) (postgres.Result, error)
+
+func (function readerFunc) Query(ctx context.Context, statement string) (postgres.Result, error) {
+	return function(ctx, statement)
+}
+
+type auditRepository struct {
+	inner     *tasktest.Repository
+	mutations []task.AuditMetadata
+}
+
+func newAuditRepository() *auditRepository {
+	return &auditRepository{inner: tasktest.NewRepository()}
+}
+
+func (r *auditRepository) Create(ctx context.Context, item task.Task) error {
+	r.mutations = append(r.mutations, task.AuditMetadataFromContext(ctx))
+	return r.inner.Create(ctx, item)
+}
+
+func (r *auditRepository) Update(ctx context.Context, item task.Task) error {
+	r.mutations = append(r.mutations, task.AuditMetadataFromContext(ctx))
+	return r.inner.Update(ctx, item)
+}
+
+func (r *auditRepository) Get(ctx context.Context, id string) (task.Task, error) {
+	return r.inner.Get(ctx, id)
+}
+
+func (r *auditRepository) List(ctx context.Context) ([]task.Task, error) {
+	return r.inner.List(ctx)
+}
+
+func TestToolsAreSharedTaskOperations(t *testing.T) {
+	t.Parallel()
+
+	repository := tasktest.NewRepository()
+	service := task.NewService(repository, time.Now, func() string { return "shared-task" })
+	tools := NewTools(service, readerFunc(func(_ context.Context, statement string) (postgres.Result, error) {
+		if statement != "SELECT id FROM tasks" {
+			t.Fatalf("query = %q", statement)
+		}
+		return postgres.Result{Columns: []string{"id"}, Rows: []map[string]any{{"id": "shared-task"}}}, nil
+	}))
+
+	ctx := task.WithAuditMetadata(context.Background(), task.AuditMetadata{ActorKind: "shared_secret", Source: "cli"})
+	created, err := tools.CreateTask(ctx, CreateTaskInput{Title: "Shared operation"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	title := "Updated operation"
+	updated, err := tools.UpdateTask(ctx, UpdateTaskInput{ID: created.ID, Title: &title})
+	if err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+	if updated.Title != title || updated.Version != 2 {
+		t.Fatalf("updated task = %#v", updated)
+	}
+	result, err := tools.QueryTasksSQL(ctx, SQLQueryInput{SQL: "SELECT id FROM tasks"})
+	if err != nil {
+		t.Fatalf("QueryTasksSQL: %v", err)
+	}
+	if len(result.Rows) != 1 || result.Rows[0]["id"] != "shared-task" {
+		t.Fatalf("query result = %#v", result)
+	}
+	completed, err := tools.CompleteTask(ctx, CompleteTaskInput{ID: created.ID})
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if completed.Status != task.StatusDone {
+		t.Fatalf("completed task = %#v", completed)
+	}
+}
+
+func TestHandlerInvokesToolsAndReturnsEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	repository := newAuditRepository()
+	service := task.NewService(repository, time.Now, func() string { return "api-task" })
+	tools := NewTools(service, readerFunc(func(_ context.Context, statement string) (postgres.Result, error) {
+		if strings.HasPrefix(statement, "DELETE") {
+			return postgres.Result{}, errors.New("only read-only queries are allowed")
+		}
+		return postgres.Result{Columns: []string{"answer"}, Rows: []map[string]any{{"answer": int64(42)}}}, nil
+	}))
+	handler := NewHandler(tools)
+
+	create := httptest.NewRequest(http.MethodPost, "/api/tools/create_task", strings.NewReader(`{"title":"From API"}`))
+	createResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createResponse, create)
+	if createResponse.Code != http.StatusOK || !strings.Contains(createResponse.Body.String(), `"id":"api-task"`) {
+		t.Fatalf("create response = %d %s", createResponse.Code, createResponse.Body.String())
+	}
+	stored, err := service.Get(context.Background(), "api-task")
+	if err != nil {
+		t.Fatalf("get created task: %v", err)
+	}
+	if stored.Title != "From API" {
+		t.Fatalf("stored task = %#v", stored)
+	}
+	if len(repository.mutations) != 1 ||
+		repository.mutations[0].ActorKind != "shared_secret" ||
+		repository.mutations[0].Source != "cli" {
+		t.Fatalf("API mutation audit metadata = %#v", repository.mutations)
+	}
+
+	query := httptest.NewRequest(http.MethodPost, "/api/tools/query_tasks_sql", strings.NewReader(`{"sql":"SELECT 42 AS answer"}`))
+	queryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(queryResponse, query)
+	if queryResponse.Code != http.StatusOK || !strings.Contains(queryResponse.Body.String(), `"answer":42`) {
+		t.Fatalf("query response = %d %s", queryResponse.Code, queryResponse.Body.String())
+	}
+
+	write := httptest.NewRequest(http.MethodPost, "/api/tools/query_tasks_sql", strings.NewReader(`{"sql":"DELETE FROM tasks"}`))
+	writeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(writeResponse, write)
+	if writeResponse.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(writeResponse.Body.String(), `"code":"tool_error"`) ||
+		!strings.Contains(writeResponse.Body.String(), "only read-only") {
+		t.Fatalf("write response = %d %s", writeResponse.Code, writeResponse.Body.String())
+	}
+
+	malformed := httptest.NewRequest(http.MethodPost, "/api/tools/create_task", strings.NewReader(`{`))
+	malformedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(malformedResponse, malformed)
+	if malformedResponse.Code != http.StatusBadRequest || !strings.Contains(malformedResponse.Body.String(), `"code":"invalid_input"`) {
+		t.Fatalf("malformed response = %d %s", malformedResponse.Code, malformedResponse.Body.String())
+	}
+}
+
+func TestClientUsesSharedSecretAndTypedToolContract(t *testing.T) {
+	t.Parallel()
+
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if got := r.Header.Get("Authorization"); got != "Bearer same-secret" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tools/create_task":
+			body, _ := io.ReadAll(r.Body)
+			if !strings.Contains(string(body), `"title":"Created"`) {
+				t.Errorf("create body = %s", body)
+			}
+			_, _ = io.WriteString(w, `{"data":{"id":"remote","title":"Created","status":"todo","version":1}}`)
+		case "/api/tools/update_task":
+			_, _ = io.WriteString(w, `{"data":{"id":"remote","title":"Updated","status":"todo","version":2}}`)
+		case "/api/tools/query_tasks_sql":
+			_, _ = io.WriteString(w, `{"data":{"columns":["id"],"rows":[{"id":"remote"}],"truncated":false}}`)
+		case "/api/tools/complete_task":
+			_, _ = io.WriteString(w, `{"data":{"id":"remote","title":"Updated","status":"done","version":3}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(server.URL+"/", "same-secret")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	created, err := client.CreateTask(context.Background(), CreateTaskInput{Title: "Created"})
+	if err != nil || created.ID != "remote" {
+		t.Fatalf("CreateTask = %#v, %v", created, err)
+	}
+	title := "Updated"
+	updated, err := client.UpdateTask(context.Background(), UpdateTaskInput{ID: created.ID, Title: &title})
+	if err != nil || updated.Version != 2 {
+		t.Fatalf("UpdateTask = %#v, %v", updated, err)
+	}
+	result, err := client.QueryTasksSQL(context.Background(), SQLQueryInput{SQL: "SELECT id FROM tasks"})
+	if err != nil || len(result.Rows) != 1 {
+		t.Fatalf("QueryTasksSQL = %#v, %v", result, err)
+	}
+	completed, err := client.CompleteTask(context.Background(), CompleteTaskInput{ID: created.ID})
+	if err != nil || completed.Status != task.StatusDone {
+		t.Fatalf("CompleteTask = %#v, %v", completed, err)
+	}
+	if len(paths) != 4 {
+		t.Fatalf("paths = %v", paths)
+	}
+}
+
+func TestClientReturnsStructuredAPIError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"tool_error","message":"task is blocked"}}`)
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewClient(server.URL, "same-secret")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.CompleteTask(context.Background(), CompleteTaskInput{ID: "blocked"})
+	var apiError *APIError
+	if !errors.As(err, &apiError) {
+		t.Fatalf("error = %v, want APIError", err)
+	}
+	if apiError.Status != http.StatusUnprocessableEntity ||
+		apiError.Code != "tool_error" ||
+		apiError.Message != "task is blocked" {
+		t.Fatalf("APIError = %#v", apiError)
+	}
+}
+
+func TestClientRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
+	t.Parallel()
+
+	for name, test := range map[string]struct {
+		apiURL string
+		secret string
+	}{
+		"missing URL":       {"", "secret"},
+		"missing secret":    {"https://tasks.example.com", ""},
+		"non HTTP scheme":   {"postgres://tasks.example.com/tasks", "secret"},
+		"insecure remote":   {"http://tasks.example.com", "secret"},
+		"URL with query":    {"https://tasks.example.com?private=value", "secret"},
+		"URL with fragment": {"https://tasks.example.com#fragment", "secret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewClient(test.apiURL, test.secret); err == nil {
+				t.Fatalf("NewClient(%q, ...) succeeded", test.apiURL)
+			}
+		})
+	}
+}
+
+func TestHandlerRejectsUnknownTool(t *testing.T) {
+	t.Parallel()
+
+	tools := NewTools(
+		task.NewService(tasktest.NewRepository(), time.Now, func() string { return "unused" }),
+		readerFunc(func(context.Context, string) (postgres.Result, error) { return postgres.Result{}, nil }),
+	)
+	request := httptest.NewRequest(http.MethodPost, "/api/tools/not_a_tool", strings.NewReader(`{}`))
+	response := httptest.NewRecorder()
+	NewHandler(tools).ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.Code)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error.Code != "tool_not_found" {
+		t.Fatalf("error code = %q", envelope.Error.Code)
+	}
+}

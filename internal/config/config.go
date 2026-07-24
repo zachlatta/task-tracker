@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Address        string
 	PublicURL      string
+	APIURL         string
 	Secret         string
 	DatabaseURL    string
 	DataDir        string
@@ -68,6 +69,7 @@ func Load(dotenvPath string) (Config, error) {
 	return Config{
 		Address:        address,
 		PublicURL:      strings.TrimRight(get("TASKS_PUBLIC_URL", "https://tasks.hackclub.com"), "/"),
+		APIURL:         strings.TrimRight(get("TASKS_API_URL", ""), "/"),
 		Secret:         get("TASKS_SECRET", ""),
 		DatabaseURL:    get("TASKS_DATABASE_URL", ""),
 		DataDir:        dataDirectory,

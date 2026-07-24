@@ -8,7 +8,13 @@ import (
 	"github.com/zachlatta/tasks/internal/auth"
 )
 
-func NewHTTPHandler(web http.Handler, oauth *auth.Server, mcpServer *mcp.Server, publicURL string) (http.Handler, error) {
+func NewHTTPHandler(
+	web http.Handler,
+	oauth *auth.Server,
+	mcpServer *mcp.Server,
+	taskAPI http.Handler,
+	publicURL string,
+) (http.Handler, error) {
 	mux := http.NewServeMux()
 	oauth.RegisterRoutes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -23,6 +29,7 @@ func NewHTTPHandler(web http.Handler, oauth *auth.Server, mcpServer *mcp.Server,
 		return nil, fmt.Errorf("configure MCP origin protection: %w", err)
 	}
 	mux.Handle("/mcp", crossOrigin.Handler(oauth.RequireBearer(mcpHandler)))
+	mux.Handle("/api/tools/", oauth.RequireSharedSecretBearer(taskAPI))
 	mux.Handle("/", web)
 	return mux, nil
 }
