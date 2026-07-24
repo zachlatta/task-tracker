@@ -496,7 +496,7 @@ kbd {
   border-radius: var(--radius);
   box-shadow: var(--shadow-card);
 }
-.drawer .task-detail { border: 0; border-radius: 0; box-shadow: none; padding: 0 0 2rem; }
+.drawer .task-detail { border: 0; border-radius: 0; box-shadow: none; padding: 0 0 2rem; max-width: 60rem; margin-inline: auto; }
 
 .detail-head h2 {
   margin: .5rem 0 .4rem;
@@ -694,14 +694,17 @@ figcaption {
 }
 .drawer-panel {
   position: absolute;
-  inset: 0 0 0 auto;
-  width: min(34rem, 100%);
-  padding: 1.1rem 1.5rem 2rem;
+  inset: 0;
+  margin: auto;
+  width: min(90rem, 100% - 4rem);
+  height: calc(100% - 4rem);
+  padding: 1.4rem 2rem 2rem;
   overflow-y: auto;
   background: var(--surface);
-  border-left: 1px solid var(--rule-strong);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
   box-shadow: var(--shadow-lift);
-  animation: slide-in .26s cubic-bezier(.2, .7, .3, 1) both;
+  animation: modal-in .24s cubic-bezier(.2, .7, .3, 1) both;
 }
 .drawer-bar {
   display: flex;
@@ -727,7 +730,7 @@ figcaption {
 body.drawer-open { overflow: hidden; }
 
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slide-in { from { opacity: .4; transform: translateX(1.5rem); } to { opacity: 1; transform: none; } }
+@keyframes modal-in { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
 
 /* ---------------------------------------------------------------- toasts - */
 
@@ -809,7 +812,11 @@ body.drawer-open { overflow: hidden; }
   .composer-form > button { justify-self: start; }
   .board-hint { display: none; }
   .board-filter input { width: 100%; }
-  .drawer-panel { padding: 1rem 1.1rem 2rem; }
+  .drawer-panel {
+    width: calc(100% - 1.5rem);
+    height: calc(100% - 1.5rem);
+    padding: 1rem 1.1rem 2rem;
+  }
   .upload { grid-template-columns: 1fr; }
 }
 
