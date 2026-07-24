@@ -442,6 +442,13 @@
     field.classList.add('editing');
     display.hidden = true;
     form.hidden = false;
+    // The rich editor is a progressive enhancement over the plain control. When
+    // it mounts, it takes focus; otherwise the raw input/textarea is the editor.
+    const editor = mountEditor(form, field, display);
+    if (editor) {
+      focusEditorEnd(editor);
+      return;
+    }
     control.focus();
     if (control instanceof HTMLInputElement) control.select();
     else control.setSelectionRange(control.value.length, control.value.length);
@@ -452,6 +459,7 @@
     const display = field.querySelector('[data-edit-display]');
     const form = field.querySelector('.inline-edit');
     if (!display || !form) return;
+    unmountEditor(form);
     field.classList.remove('editing');
     form.hidden = true;
     display.hidden = false;
@@ -500,6 +508,9 @@
     const form = event.target.closest('.inline-edit');
     if (!form) return;
     event.preventDefault();
+    // Fold the rich editor's content back into the plain control the form
+    // posts, so the whole existing edit pipeline runs unchanged.
+    syncEditor(form);
     const detail = form.closest('.task-detail');
     const fieldName = form.elements.field.value;
     const submit = form.querySelector('[type="submit"]');
@@ -557,6 +568,625 @@
       filterInput.value = '';
       refresh();
     });
+  }
+
+  /* ----------------------------------------------------------- rich editor - */
+  //
+  // A What-You-See-Is-What-You-Get Markdown editor that enhances the plain
+  // title input and description textarea. It is a contenteditable surface seeded
+  // from the server's own rendered HTML, so the editing view matches the reading
+  // view without a client-side Markdown parser. On save it serializes back to
+  // Markdown and hands the text to the plain control the form already posts, so
+  // the whole edit pipeline — version checks, optimistic card refresh, toasts —
+  // runs unchanged. With scripting off, the raw input and textarea remain.
+
+  const BLOCK_TAGS = new Set([
+    'P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE', 'TABLE', 'HR', 'FIGURE',
+  ]);
+
+  const TITLE_TOOLS = ['bold', 'italic', 'strike', 'code'];
+  const DESC_TOOLS = [
+    'bold', 'italic', 'strike', 'code', '|',
+    'h2', 'h3', 'quote', 'ul', 'ol', 'task', '|',
+    'link', 'codeblock',
+  ];
+  const TOOL_META = {
+    bold: { label: 'B', title: 'Bold (⌘/Ctrl+B)', className: 'is-bold' },
+    italic: { label: 'I', title: 'Italic (⌘/Ctrl+I)', className: 'is-italic' },
+    strike: { label: 'S', title: 'Strikethrough', className: 'is-strike' },
+    code: { label: '<>', title: 'Inline code (⌘/Ctrl+E)' },
+    h2: { label: 'H2', title: 'Heading' },
+    h3: { label: 'H3', title: 'Subheading' },
+    quote: { label: '”', title: 'Quote' },
+    ul: { label: '•', title: 'Bulleted list' },
+    ol: { label: '1.', title: 'Numbered list' },
+    task: { label: '☑', title: 'Task list' },
+    link: { label: '🔗', title: 'Link (⌘/Ctrl+K)' },
+    codeblock: { label: '{ }', title: 'Code block' },
+  };
+
+  let activeEditor = null;
+
+  function supportsRichEditor() {
+    return (
+      typeof document.execCommand === 'function' &&
+      'contentEditable' in document.documentElement
+    );
+  }
+
+  function mountEditor(form, field, display) {
+    if (!supportsRichEditor()) return null;
+    if (form._wysiwyg) return form._wysiwyg.editor;
+    const fieldName = field.dataset.editField;
+    if (fieldName !== 'title' && fieldName !== 'description') return null;
+    const control = form.elements.value;
+    if (!control) return null;
+
+    const editor = document.createElement('div');
+    editor.contentEditable = 'true';
+    editor.spellcheck = true;
+    editor.setAttribute('role', 'textbox');
+    editor.setAttribute('aria-label', fieldName === 'title' ? 'Task title' : 'Description');
+    editor.className = fieldName === 'title'
+      ? 'wysiwyg-surface wysiwyg-title'
+      : 'wysiwyg-surface wysiwyg-body description';
+    if (fieldName === 'description') editor.setAttribute('aria-multiline', 'true');
+
+    if (fieldName === 'description') editor.dataset.placeholder = 'Write a description…';
+
+    const source = fieldName === 'title' ? display : display.querySelector('.description');
+    editor.innerHTML = source ? source.innerHTML : '';
+    prepareEditor(editor);
+
+    const toolbar = buildToolbar(fieldName, editor);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'wysiwyg';
+    wrapper.append(toolbar, editor);
+    control.hidden = true;
+    form.insertBefore(wrapper, control);
+    form._wysiwyg = { editor, toolbar, wrapper, fieldName };
+    activeEditor = editor;
+
+    try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch (_) { /* older browsers */ }
+    try { document.execCommand('styleWithCSS', false, false); } catch (_) { /* older browsers */ }
+    attachEditorEvents(editor, fieldName);
+    syncToolbarState(editor);
+    return editor;
+  }
+
+  function unmountEditor(form) {
+    if (!form || !form._wysiwyg) return;
+    const { editor, wrapper } = form._wysiwyg;
+    if (activeEditor === editor) activeEditor = null;
+    wrapper.remove();
+    const control = form.elements.value;
+    if (control) control.hidden = false;
+    delete form._wysiwyg;
+  }
+
+  function syncEditor(form) {
+    if (!form || !form._wysiwyg) return;
+    const { editor, fieldName } = form._wysiwyg;
+    const control = form.elements.value;
+    if (!control) return;
+    control.value = fieldName === 'title'
+      ? serializeInline(editor)
+      : serializeMarkdown(editor);
+  }
+
+  // prepareEditor makes the seeded HTML editable: task-list checkboxes render
+  // disabled for reading, so re-enable them to toggle while editing.
+  function prepareEditor(editor) {
+    editor.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+      box.removeAttribute('disabled');
+    });
+  }
+
+  function focusEditorEnd(editor) {
+    editor.focus();
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function buildToolbar(fieldName, editor) {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'wysiwyg-toolbar';
+    toolbar.setAttribute('role', 'toolbar');
+    toolbar.setAttribute('aria-label', 'Formatting');
+    (fieldName === 'title' ? TITLE_TOOLS : DESC_TOOLS).forEach((key) => {
+      if (key === '|') {
+        const separator = document.createElement('span');
+        separator.className = 'wysiwyg-sep';
+        separator.setAttribute('aria-hidden', 'true');
+        toolbar.append(separator);
+        return;
+      }
+      const meta = TOOL_META[key];
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'wysiwyg-tool' + (meta.className ? ' ' + meta.className : '');
+      button.dataset.cmd = key;
+      button.textContent = meta.label;
+      button.title = meta.title;
+      button.setAttribute('aria-label', meta.title);
+      button.setAttribute('aria-pressed', 'false');
+      toolbar.append(button);
+    });
+    // Keep the selection in the editor: a mousedown on a tool must not move
+    // focus to the button, or the command would have nothing to act on.
+    toolbar.addEventListener('mousedown', (event) => {
+      if (event.target.closest('.wysiwyg-tool')) event.preventDefault();
+    });
+    toolbar.addEventListener('click', (event) => {
+      const button = event.target.closest('.wysiwyg-tool');
+      if (!button) return;
+      event.preventDefault();
+      execTool(button.dataset.cmd, editor);
+    });
+    return toolbar;
+  }
+
+  function attachEditorEvents(editor, fieldName) {
+    editor.addEventListener('keydown', (event) => {
+      const meta = event.metaKey || event.ctrlKey;
+      if (meta && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'b') { event.preventDefault(); execTool('bold', editor); return; }
+        if (key === 'i') { event.preventDefault(); execTool('italic', editor); return; }
+        if (key === 'e') { event.preventDefault(); execTool('code', editor); return; }
+        if (fieldName === 'description' && key === 'k') {
+          event.preventDefault();
+          execTool('link', editor);
+          return;
+        }
+      }
+      // Enter submits a single-line title; the shared .inline-edit handler does
+      // the submit, this just stops a newline from being inserted first.
+      if (fieldName === 'title' && event.key === 'Enter') event.preventDefault();
+    });
+    editor.addEventListener('input', () => syncToolbarState(editor));
+    editor.addEventListener('keyup', () => syncToolbarState(editor));
+    editor.addEventListener('mouseup', () => syncToolbarState(editor));
+    // Checkboxes inside contenteditable do not always toggle on their own.
+    editor.addEventListener('click', (event) => {
+      const box = event.target.closest('input[type="checkbox"]');
+      if (!box) return;
+      window.requestAnimationFrame(() => box.toggleAttribute('checked', box.checked));
+    });
+  }
+
+  /* ------------------------------------------------------- editor commands - */
+
+  function execTool(key, editor) {
+    editor.focus();
+    switch (key) {
+      case 'bold': document.execCommand('bold'); break;
+      case 'italic': document.execCommand('italic'); break;
+      case 'strike': document.execCommand('strikeThrough'); break;
+      case 'ul': document.execCommand('insertUnorderedList'); break;
+      case 'ol': document.execCommand('insertOrderedList'); break;
+      case 'h2': toggleBlock(editor, 'h2'); break;
+      case 'h3': toggleBlock(editor, 'h3'); break;
+      case 'quote': toggleBlock(editor, 'blockquote'); break;
+      case 'task': toggleTaskList(editor); break;
+      case 'code': toggleInlineCode(editor); break;
+      case 'codeblock': toggleCodeBlock(editor); break;
+      case 'link': insertLink(editor); break;
+      default: break;
+    }
+    syncToolbarState(editor);
+  }
+
+  function toggleBlock(editor, tag) {
+    const block = currentBlock(editor);
+    const target = block && block.tagName === tag.toUpperCase() ? 'p' : tag;
+    document.execCommand('formatBlock', false, target);
+  }
+
+  function currentBlock(editor) {
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    let node = selection.getRangeAt(0).startContainer;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+    while (node && node !== editor) {
+      if (node.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has(node.tagName)) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function currentListItem(editor) {
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    let node = selection.getRangeAt(0).startContainer;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+    while (node && node !== editor) {
+      if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function ancestorMatching(editor, test) {
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    let node = selection.getRangeAt(0).startContainer;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+    while (node && node !== editor) {
+      if (node.nodeType === Node.ELEMENT_NODE && test(node)) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function toggleTaskList(editor) {
+    let item = currentListItem(editor);
+    if (!item) {
+      document.execCommand('insertUnorderedList');
+      item = currentListItem(editor);
+      if (!item) return;
+    }
+    const existing = item.querySelector(':scope > input[type="checkbox"]');
+    if (existing) {
+      existing.remove();
+      item.classList.remove('task-list-item');
+      return;
+    }
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    item.classList.add('task-list-item');
+    item.insertBefore(document.createTextNode(' '), item.firstChild);
+    item.insertBefore(box, item.firstChild);
+  }
+
+  function toggleInlineCode(editor) {
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return;
+    const existing = ancestorMatching(
+      editor,
+      (node) => node.tagName === 'CODE' && !node.closest('pre'),
+    );
+    if (existing) {
+      unwrap(existing);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (range.collapsed) return;
+    const code = document.createElement('code');
+    try {
+      range.surroundContents(code);
+    } catch (_) {
+      code.appendChild(range.extractContents());
+      range.insertNode(code);
+    }
+    selectNodeContents(code);
+  }
+
+  function toggleCodeBlock(editor) {
+    const pre = ancestorMatching(editor, (node) => node.tagName === 'PRE');
+    if (pre) {
+      const paragraph = document.createElement('p');
+      paragraph.textContent = (pre.textContent || '').replace(/\n$/, '');
+      if (!paragraph.textContent) paragraph.appendChild(document.createElement('br'));
+      pre.replaceWith(paragraph);
+      placeCaretAtEnd(paragraph);
+      return;
+    }
+    const block = currentBlock(editor);
+    const preEl = document.createElement('pre');
+    const code = document.createElement('code');
+    code.textContent = block ? block.textContent : '';
+    preEl.appendChild(code);
+    if (block && block.parentElement === editor) block.replaceWith(preEl);
+    else editor.appendChild(preEl);
+    placeCaretAtEnd(code);
+  }
+
+  function insertLink(editor) {
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return;
+    const existing = ancestorMatching(editor, (node) => node.tagName === 'A');
+    if (existing) {
+      unwrap(existing);
+      return;
+    }
+    if (selection.getRangeAt(0).collapsed) return;
+    const url = window.prompt('Link URL');
+    if (!url) return;
+    document.execCommand('createLink', false, url.trim());
+  }
+
+  function unwrap(element) {
+    const parent = element.parentNode;
+    if (!parent) return;
+    while (element.firstChild) parent.insertBefore(element.firstChild, element);
+    parent.removeChild(element);
+  }
+
+  function selectNodeContents(node) {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function placeCaretAtEnd(node) {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function queryState(command) {
+    try { return document.queryCommandState(command); } catch (_) { return false; }
+  }
+
+  function syncToolbarState(editor) {
+    const form = editor.closest('.inline-edit');
+    if (!form || !form._wysiwyg) return;
+    const states = {
+      bold: queryState('bold'),
+      italic: queryState('italic'),
+      strike: queryState('strikeThrough'),
+      h2: !!ancestorMatching(editor, (node) => node.tagName === 'H2'),
+      h3: !!ancestorMatching(editor, (node) => node.tagName === 'H3'),
+      quote: !!ancestorMatching(editor, (node) => node.tagName === 'BLOCKQUOTE'),
+      code: !!ancestorMatching(editor, (node) => node.tagName === 'CODE' && !node.closest('pre')),
+      codeblock: !!ancestorMatching(editor, (node) => node.tagName === 'PRE'),
+      link: !!ancestorMatching(editor, (node) => node.tagName === 'A'),
+      ul: false,
+      ol: false,
+      task: false,
+    };
+    const item = currentListItem(editor);
+    if (item) {
+      const list = item.parentElement;
+      states.task = !!item.querySelector(':scope > input[type="checkbox"]');
+      if (list && list.tagName === 'OL') states.ol = true;
+      else if (list && list.tagName === 'UL' && !states.task) states.ul = true;
+    }
+    form._wysiwyg.toolbar.querySelectorAll('[data-cmd]').forEach((button) => {
+      const active = !!states[button.dataset.cmd];
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  document.addEventListener('selectionchange', () => {
+    if (!activeEditor || !activeEditor.isConnected) return;
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return;
+    if (activeEditor.contains(selection.getRangeAt(0).startContainer)) {
+      syncToolbarState(activeEditor);
+    }
+  });
+
+  /* ---------------------------------------------------- HTML → Markdown - */
+
+  function serializeMarkdown(root) {
+    // Keep trailing spaces: two of them before a newline are a Markdown hard
+    // break. Only collapse runs of blank lines.
+    const markdown = blockParts(root).join('\n\n');
+    return markdown.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  function serializeInline(root) {
+    return inlineChildrenToMd(root).replace(/\s+/g, ' ').trim();
+  }
+
+  function blockParts(root) {
+    const parts = [];
+    root.childNodes.forEach((node) => {
+      const markdown = blockToMd(node);
+      if (markdown == null) return;
+      const trimmed = markdown.replace(/\s+$/, '');
+      if (trimmed !== '') parts.push(trimmed);
+    });
+    return parts;
+  }
+
+  function hasBlockChild(node) {
+    return Array.from(node.children).some((child) => BLOCK_TAGS.has(child.tagName));
+  }
+
+  function blockToMd(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.nodeValue.replace(/\s+/g, ' ').trim();
+      return text ? escapeBlockLead(escapeInline(text)) : '';
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    switch (node.tagName) {
+      case 'H1': case 'H2': case 'H3': case 'H4': case 'H5': case 'H6':
+        return '#'.repeat(Number(node.tagName[1])) + ' ' + inlineChildrenToMd(node).trim();
+      case 'P': {
+        // A list command can leave a block (a UL/OL) nested inside a paragraph.
+        // Serialize those as blocks rather than flattening them into a line.
+        if (hasBlockChild(node)) return blockParts(node).join('\n\n');
+        const inline = inlineChildrenToMd(node).replace(/^\n+|\n+$/g, '');
+        return inline.trim() ? escapeBlockLead(inline) : '';
+      }
+      case 'UL': return listLines(node, false, '').join('\n');
+      case 'OL': return listLines(node, true, '').join('\n');
+      case 'BLOCKQUOTE': return blockquoteToMd(node);
+      case 'PRE': return preToMd(node);
+      case 'HR': return '---';
+      case 'TABLE': return tableToMd(node);
+      case 'FIGURE': return blockParts(node).join('\n\n');
+      case 'BR': return '';
+      default: {
+        if (hasBlockChild(node)) return blockParts(node).join('\n\n');
+        const inline = inlineChildrenToMd(node).trim();
+        return inline ? escapeBlockLead(inline) : '';
+      }
+    }
+  }
+
+  function inlineChildrenToMd(element) {
+    let out = '';
+    element.childNodes.forEach((child) => { out += inlineNodeToMd(child); });
+    return out;
+  }
+
+  function inlineNodeToMd(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeInline(node.nodeValue.replace(/\r?\n/g, ' '));
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    switch (node.tagName) {
+      case 'BR': return '  \n';
+      case 'STRONG': case 'B': return wrapMarks('**', inlineChildrenToMd(node));
+      case 'EM': case 'I': return wrapMarks('*', inlineChildrenToMd(node));
+      case 'DEL': case 'S': case 'STRIKE': return wrapMarks('~~', inlineChildrenToMd(node));
+      case 'CODE': return codeSpan(node.textContent);
+      case 'A': {
+        const inner = inlineChildrenToMd(node).trim() || escapeInline(node.textContent.trim());
+        const href = node.getAttribute('href') || '';
+        return href ? '[' + inner + '](' + href + ')' : inner;
+      }
+      case 'IMG': {
+        const alt = (node.getAttribute('alt') || '').trim();
+        const src = node.getAttribute('src') || '';
+        return src ? '![' + alt + '](' + src + ')' : '';
+      }
+      case 'INPUT': return '';
+      default: return inlineChildrenToMd(node);
+    }
+  }
+
+  function wrapMarks(marker, inner) {
+    if (!inner) return '';
+    const match = inner.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    const lead = match[1];
+    const core = match[2];
+    const trail = match[3];
+    if (!core) return inner;
+    return lead + marker + core + marker + trail;
+  }
+
+  function codeSpan(text) {
+    const value = text.replace(/\r?\n/g, ' ');
+    let ticks = '`';
+    const runs = value.match(/`+/g);
+    if (runs) ticks = '`'.repeat(Math.max.apply(null, runs.map((run) => run.length)) + 1);
+    const pad = /^`|`$|^\s|\s$/.test(value) && value !== '' ? ' ' : '';
+    return ticks + pad + value + pad + ticks;
+  }
+
+  function listLines(list, ordered, indent) {
+    const lines = [];
+    let index = parseInt(list.getAttribute('start') || '1', 10);
+    if (!Number.isFinite(index)) index = 1;
+    Array.from(list.children).forEach((item) => {
+      if (item.tagName !== 'LI') return;
+      const task = taskState(item);
+      let marker;
+      if (task !== null) marker = task ? '- [x] ' : '- [ ] ';
+      else if (ordered) { marker = index + '. '; index += 1; }
+      else marker = '- ';
+      const pad = ' '.repeat(marker.length);
+
+      const split = splitListItem(item);
+      const contentLines = split.content.split('\n');
+      lines.push(indent + marker + (contentLines[0] || '').replace(/\s+$/, ''));
+      for (let i = 1; i < contentLines.length; i += 1) {
+        lines.push(indent + pad + contentLines[i]);
+      }
+      split.sublists.forEach((sub) => {
+        listLines(sub, sub.tagName === 'OL', indent + pad).forEach((line) => lines.push(line));
+      });
+    });
+    return lines;
+  }
+
+  function taskState(item) {
+    const box = item.querySelector(
+      ':scope > input[type="checkbox"], :scope > p > input[type="checkbox"], :scope > label > input[type="checkbox"]',
+    );
+    if (!box) return null;
+    return box.checked;
+  }
+
+  function splitListItem(item) {
+    const contentNodes = [];
+    const sublists = [];
+    item.childNodes.forEach((node) => {
+      if (node.nodeType === Node.ELEMENT_NODE && (node.tagName === 'UL' || node.tagName === 'OL')) {
+        sublists.push(node);
+      } else {
+        contentNodes.push(node);
+      }
+    });
+    let content;
+    if (contentNodes.length === 1 &&
+        contentNodes[0].nodeType === Node.ELEMENT_NODE &&
+        contentNodes[0].tagName === 'P') {
+      content = inlineChildrenToMd(contentNodes[0]);
+    } else {
+      content = contentNodes.map(inlineNodeToMd).join('');
+    }
+    return { content: content.replace(/^\s+|\s+$/g, ''), sublists };
+  }
+
+  function blockquoteToMd(element) {
+    const inner = blockParts(element).join('\n\n');
+    return inner.split('\n').map((line) => (line ? '> ' + line : '>')).join('\n');
+  }
+
+  function preToMd(element) {
+    const code = element.querySelector('code') || element;
+    let language = '';
+    const className = code.getAttribute('class') || element.getAttribute('class') || '';
+    const match = className.match(/language-([\w#+.-]+)/);
+    if (match) language = match[1];
+    const text = (code.textContent || '').replace(/\n$/, '');
+    let fence = '```';
+    const runs = text.match(/`{3,}/g);
+    if (runs) fence = '`'.repeat(Math.max.apply(null, runs.map((run) => run.length)) + 1);
+    return fence + language + '\n' + text + '\n' + fence;
+  }
+
+  function tableToMd(table) {
+    const headRow = table.querySelector('thead tr');
+    if (!headRow) return table.textContent.trim();
+    const headCells = Array.from(headRow.children);
+    const header = headCells.map((cell) => inlineChildrenToMd(cell).trim().replace(/\|/g, '\\|'));
+    const aligns = headCells.map((cell) => {
+      const align = (cell.getAttribute('align') || cell.style.textAlign || '').toLowerCase();
+      if (align === 'center') return ':---:';
+      if (align === 'right') return '---:';
+      if (align === 'left') return ':---';
+      return '---';
+    });
+    const lines = ['| ' + header.join(' | ') + ' |', '| ' + aligns.join(' | ') + ' |'];
+    table.querySelectorAll('tbody tr').forEach((row) => {
+      const cells = Array.from(row.children).map(
+        (cell) => inlineChildrenToMd(cell).trim().replace(/\|/g, '\\|'),
+      );
+      lines.push('| ' + cells.join(' | ') + ' |');
+    });
+    return lines.join('\n');
+  }
+
+  function escapeInline(text) {
+    return text.replace(/[\\`]/g, '\\$&');
+  }
+
+  function escapeBlockLead(text) {
+    return text
+      .replace(/^(\s*\d+)([.)] )/, '$1\\$2')
+      .replace(/^(\s*)([#>+\-*] )/, '$1\\$2')
+      .replace(/^(\s*)(#{1,6} )/, '$1\\$2');
   }
 
   refresh();

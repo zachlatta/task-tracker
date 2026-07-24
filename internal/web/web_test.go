@@ -233,6 +233,48 @@ func TestTaskDescriptionsRenderSafeMarkdown(t *testing.T) {
 	}
 }
 
+func TestTaskTitlesRenderInlineMarkdown(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "shout")
+	if _, err := service.Create(context.Background(), task.CreateInput{
+		Title: "Ship **v2** & visit https://example.com now",
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cookie, _ := login(t, handler)
+
+	board := get(t, handler, "/", cookie).Body.String()
+	// The card renders the title's inline emphasis...
+	if !strings.Contains(board, `<strong>v2</strong>`) {
+		t.Errorf("board card does not render inline title Markdown; body: %s", board)
+	}
+	// ...but never nests a link inside the card's own anchor.
+	if strings.Contains(board, `href="https://example.com"`) {
+		t.Errorf("board card renders a nested title link; body: %s", board)
+	}
+	// The card's accessible name is plain text, with Markdown flattened away.
+	if !strings.Contains(board, `aria-label="Ship v2 &amp; visit https://example.com now, To do"`) {
+		t.Errorf("board card aria-label is not flattened plain text; body: %s", board)
+	}
+
+	detail := get(t, handler, "/shout", cookie).Body.String()
+	if !strings.Contains(detail, `<strong>v2</strong>`) {
+		t.Errorf("task detail heading does not render inline title Markdown; body: %s", detail)
+	}
+	// The browser tab title is flattened plain text, not Markdown or HTML.
+	if !strings.Contains(detail, `<title>Ship v2 &amp; visit https://example.com now · Tasks</title>`) {
+		t.Errorf("document title is not flattened plain text; body: %s", detail)
+	}
+	if strings.Contains(detail, "<title>Ship <strong>") || strings.Contains(detail, "<title>Ship **v2**") {
+		t.Errorf("document title leaks Markdown or HTML; body: %s", detail)
+	}
+	// The raw Markdown title survives untouched in the no-JS edit field.
+	if !strings.Contains(detail, `value="Ship **v2** &amp; visit https://example.com now"`) {
+		t.Errorf("title edit field does not hold the raw Markdown source; body: %s", detail)
+	}
+}
+
 func TestTaskPageShowsOnlyRequestedTask(t *testing.T) {
 	t.Parallel()
 
@@ -1050,6 +1092,7 @@ func TestExcerptFlattensMarkdownForCards(t *testing.T) {
 		"images":                {"![a diagram](/images/x.png) after", "after"},
 		"fenced code":           {"before\n\n```go\nfmt.Println(1)\n```\n\nafter", "before after"},
 		"raw html":              {"<script>alert(1)</script>keep", "alert(1) keep"},
+		"escaped punctuation":   {`escaped \[brackets\] and \& survive`, "escaped [brackets] and & survive"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := excerpt(expectation.source); got != expectation.want {

@@ -1,6 +1,6 @@
 {{define "detail.html"}}<!doctype html>
 <html lang="en">
-{{template "document-head" .DetailTask.Title}}
+{{template "document-head" (plainTitle .DetailTask.Title)}}
 <body class="detail-page" data-csrf="{{.CSRF}}">
   {{template "site-header" .}}
   <main>

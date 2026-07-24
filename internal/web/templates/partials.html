@@ -16,8 +16,8 @@
   </form>
 </header>{{end}}
 
-{{define "task-card"}}<article class="task-card" data-task-id="{{.ID}}" data-status="{{.Status}}" draggable="true" tabindex="0" aria-label="{{.Title}}, {{.StatusLabel}}">
-  <a class="card-title" href="/{{.ID}}" draggable="false">{{.Title}}</a>
+{{define "task-card"}}<article class="task-card" data-task-id="{{.ID}}" data-status="{{.Status}}" draggable="true" tabindex="0" aria-label="{{plainTitle .Title}}, {{.StatusLabel}}">
+  <a class="card-title" href="/{{.ID}}" draggable="false">{{renderInlineMarkdown .Title}}</a>
   {{with .Excerpt}}<p class="card-excerpt">{{.}}</p>{{end}}
   {{with .Cover}}<img class="card-cover" src="/attachments/{{.Key}}" alt="" loading="lazy" draggable="false">{{end}}
   <div class="card-meta">
@@ -28,7 +28,7 @@
     <time class="card-time" datetime="{{.Timestamp}}">{{.Relative}}</time>
   </div>
   <details class="card-move">
-    <summary aria-label="Move {{.Title}}">{{template "icon-move"}}</summary>
+    <summary aria-label="Move {{plainTitle .Title}}">{{template "icon-move"}}</summary>
     <form method="post" action="/tasks/{{.ID}}/move">
       <input type="hidden" name="csrf" value="{{.CSRF}}">
       {{range .Moves}}<button type="submit" name="status" value="{{.Status}}">{{.Label}}</button>{{end}}
@@ -40,7 +40,7 @@
   <header class="detail-head">
     <span class="status-pill">{{.StatusLabel}}</span>
     <div class="editable-field editable-title" data-edit-field="title">
-      <h2 class="editable-display" data-edit-display tabindex="0" title="Double-click to edit">{{.Title}}</h2>
+      <h2 class="editable-display" data-edit-display tabindex="0" title="Double-click to edit">{{renderInlineMarkdown .Title}}</h2>
       <form class="inline-edit" method="post" action="/tasks/{{.ID}}/edit" hidden>
         <input type="hidden" name="csrf" value="{{.CSRF}}">
         <input type="hidden" name="field" value="title">

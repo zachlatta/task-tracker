@@ -182,7 +182,9 @@ type moveResult struct {
 // editResult refreshes both places edited text can be visible: the board card
 // and the open task detail.
 type editResult struct {
-	ID      string `json:"id"`
+	ID string `json:"id"`
+	// Title is the flattened plain-text title used to refresh document.title,
+	// never the raw Markdown a title may now carry.
 	Title   string `json:"title"`
 	Card    string `json:"card"`
 	Detail  string `json:"detail"`
@@ -207,8 +209,10 @@ func New(config Config) http.Handler {
 		sessions:      config.Sessions,
 	}
 	h.templates = template.Must(template.New("").Funcs(template.FuncMap{
-		"renderMarkdown": renderMarkdown,
-		"isImage":        isImage,
+		"renderMarkdown":       renderMarkdown,
+		"renderInlineMarkdown": renderInlineMarkdown,
+		"plainTitle":           plainTitle,
+		"isImage":              isImage,
 	}).ParseFS(assets, "templates/*.html"))
 	h.mux.HandleFunc("GET /static/{file}", h.static)
 	h.mux.HandleFunc("GET /login", h.loginPage)
@@ -437,7 +441,7 @@ func (h *handler) writeEdit(w http.ResponseWriter, r *http.Request, item task.Ta
 	}
 	writeJSON(w, http.StatusOK, editResult{
 		ID:      item.ID,
-		Title:   item.Title,
+		Title:   plainTitle(item.Title),
 		Card:    cardHTML.String(),
 		Detail:  detailHTML.String(),
 		Message: message,
@@ -769,22 +773,40 @@ var (
 	listMarker    = regexp.MustCompile(`(?m)^\s*([-+*]|\d+\.)\s+(\[[ xX]\]\s*)?`)
 	markdownMarks = regexp.MustCompile("[*_`~>#|]+")
 	whitespace    = regexp.MustCompile(`\s+`)
+	// markdownEscape matches a backslash escaping ASCII punctuation, which the
+	// rich editor emits so literal markers survive a round trip. Flattening
+	// drops the backslash so previews and titles read as plain text.
+	markdownEscape = regexp.MustCompile("\\\\([!-/:-@\\[-\x60{-~])")
 )
 
-// excerpt flattens a Markdown description into the single line of plain text a
-// board card previews. Cards deliberately show a preview, not the document.
-func excerpt(source string) string {
-	text := fencedCode.ReplaceAllString(source, " ")
+// flattenMarkdown reduces Markdown to a single line of plain text, dropping
+// structure and markup while keeping the words a reader would speak.
+func flattenMarkdown(source string) string {
+	text := markdownEscape.ReplaceAllString(source, "$1")
+	text = fencedCode.ReplaceAllString(text, " ")
 	text = embeddedImage.ReplaceAllString(text, " ")
 	text = linkedText.ReplaceAllString(text, "$1")
 	text = markupTag.ReplaceAllString(text, " ")
 	text = listMarker.ReplaceAllString(text, " ")
 	text = markdownMarks.ReplaceAllString(text, "")
-	text = strings.TrimSpace(whitespace.ReplaceAllString(text, " "))
+	return strings.TrimSpace(whitespace.ReplaceAllString(text, " "))
+}
+
+// excerpt flattens a Markdown description into the single line of plain text a
+// board card previews. Cards deliberately show a preview, not the document.
+func excerpt(source string) string {
+	text := flattenMarkdown(source)
 	if characters := []rune(text); len(characters) > excerptLimit {
 		text = strings.TrimSpace(string(characters[:excerptLimit])) + "…"
 	}
 	return text
+}
+
+// plainTitle flattens a Markdown title to plain text for the places a title
+// must not carry markup: the browser tab title, a card's accessible name, and
+// the JSON a live edit uses to refresh document.title.
+func plainTitle(source string) string {
+	return flattenMarkdown(source)
 }
 
 func renderMarkdown(source string) template.HTML {
@@ -793,6 +815,29 @@ func renderMarkdown(source string) template.HTML {
 	// Goldmark omits raw HTML and dangerous URLs unless explicitly configured
 	// as unsafe, so this rendered output is safe to pass through html/template.
 	return template.HTML(output.String())
+}
+
+var (
+	// inlineParagraph matches the lone paragraph goldmark wraps around a
+	// single line of Markdown, so a title can render as inline HTML.
+	inlineParagraph = regexp.MustCompile(`(?s)\A<p>(.*)</p>\z`)
+	// anchorTag matches a link's opening or closing tag. Titles render inside a
+	// card's own anchor, which must never nest another link.
+	anchorTag = regexp.MustCompile(`</?a\b[^>]*>`)
+)
+
+// renderInlineMarkdown renders a task title's Markdown as inline HTML. It keeps
+// emphasis, strong, strikethrough, and code, but strips the wrapping paragraph
+// and any links so the result is safe to drop inside a card's own anchor.
+func renderInlineMarkdown(source string) template.HTML {
+	var output bytes.Buffer
+	_ = markdownRenderer.Convert([]byte(source), &output)
+	rendered := strings.TrimRight(output.String(), "\n")
+	if match := inlineParagraph.FindStringSubmatch(rendered); match != nil {
+		rendered = match[1]
+	}
+	rendered = anchorTag.ReplaceAllString(rendered, "")
+	return template.HTML(rendered)
 }
 
 func securityHeaders(next http.Handler) http.Handler {

@@ -589,6 +589,85 @@ kbd {
   text-transform: none;
 }
 
+/* ------------------------------------------------------------ rich editor - */
+
+.wysiwyg { display: flex; flex-direction: column; }
+.wysiwyg-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .2rem;
+  align-items: center;
+  padding: .3rem;
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule-strong);
+  border-bottom: 0;
+  border-radius: .4rem .4rem 0 0;
+}
+.wysiwyg-tool {
+  display: grid;
+  place-items: center;
+  min-width: 1.9rem;
+  height: 1.9rem;
+  padding: 0 .4rem;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: .3rem;
+  font-family: var(--mono);
+  font-size: .78rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.wysiwyg-tool:hover { color: var(--ink); background: var(--surface); border-color: var(--rule); filter: none; }
+.wysiwyg-tool:active { transform: none; }
+.wysiwyg-tool.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.wysiwyg-tool.is-bold { font-weight: 800; }
+.wysiwyg-tool.is-italic { font-style: italic; }
+.wysiwyg-tool.is-strike { text-decoration: line-through; }
+.wysiwyg-sep {
+  width: 1px;
+  height: 1.2rem;
+  margin: 0 .2rem;
+  background: var(--rule-strong);
+}
+
+.wysiwyg-surface {
+  padding: .6rem .7rem;
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: 0 0 .4rem .4rem;
+  outline-offset: -2px;
+  overflow-wrap: anywhere;
+}
+.wysiwyg-surface:focus-visible { outline: 2px solid var(--accent); }
+.wysiwyg-body { min-height: 12rem; }
+.wysiwyg-body:empty::before,
+.wysiwyg-title:empty::before {
+  content: attr(data-placeholder);
+  color: var(--ink-faint);
+  pointer-events: none;
+}
+.wysiwyg-body > :first-child { margin-top: 0; }
+.wysiwyg-body > :last-child { margin-bottom: 0; }
+/* Show list markers and let task checkboxes be clicked while editing. */
+.wysiwyg-body ul { list-style: disc; }
+.wysiwyg-body ol { list-style: decimal; }
+.wysiwyg-body li.task-list-item { list-style: none; }
+.wysiwyg-body input[type="checkbox"] { width: auto; margin-right: .35rem; padding: 0; cursor: pointer; }
+.wysiwyg-title {
+  font-family: var(--display);
+  font-size: clamp(1.4rem, 3vw, 1.9rem);
+  font-weight: 600;
+  line-height: 1.15;
+  white-space: pre-wrap;
+}
+/* The title editor spans the whole row; Save/Cancel drop beneath it. */
+.editable-title .wysiwyg { grid-column: 1 / -1; }
+
 .detail-moves {
   display: flex;
   flex-wrap: wrap;
