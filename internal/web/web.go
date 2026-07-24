@@ -23,7 +23,11 @@ import (
 	"time"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 	"github.com/zachlatta/tasks/internal/auth"
 	"github.com/zachlatta/tasks/internal/objectstore"
 	"github.com/zachlatta/tasks/internal/task"
@@ -61,7 +65,24 @@ const (
 //go:embed templates/*.html static/*.css static/*.js
 var assets embed.FS
 
-var markdownRenderer = goldmark.New(goldmark.WithExtensions(extension.GFM))
+var markdownRenderer = goldmark.New(
+	goldmark.WithExtensions(extension.GFM),
+	goldmark.WithParserOptions(parser.WithASTTransformers(
+		util.Prioritized(newTabLinkTransformer{}, 100),
+	)),
+)
+
+type newTabLinkTransformer struct{}
+
+func (newTabLinkTransformer) Transform(document *ast.Document, _ text.Reader, _ parser.Context) {
+	_ = ast.Walk(document, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if entering && (node.Kind() == ast.KindLink || node.Kind() == ast.KindAutoLink) {
+			node.SetAttributeString("target", []byte("_blank"))
+			node.SetAttributeString("rel", []byte("noopener noreferrer"))
+		}
+		return ast.WalkContinue, nil
+	})
+}
 
 type Config struct {
 	Tasks         *task.Service

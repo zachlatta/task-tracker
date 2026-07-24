@@ -209,7 +209,7 @@ func TestTaskDescriptionsRenderSafeMarkdown(t *testing.T) {
 		`<div class="description">`,
 		`<h2>Launch plan</h2>`,
 		`<li>render <strong>bold</strong> text</li>`,
-		`href="https://example.com"`,
+		`href="https://example.com" target="_blank" rel="noopener noreferrer"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("task detail does not contain rendered Markdown %q; body: %s", want, body)
