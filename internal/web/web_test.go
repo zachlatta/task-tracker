@@ -58,9 +58,9 @@ func TestLoginProtectsTaskPage(t *testing.T) {
 	if body := page.Body.String(); !strings.Contains(body, "<title>Tasks</title>") {
 		t.Fatalf("index page identity is stale; body: %s", body)
 	}
-	// The page must describe the real storage backend, not the pre-migration one.
-	if body := page.Body.String(); !strings.Contains(body, "POSTGRES-BACKED") || strings.Contains(body, "MARKDOWN-BACKED") {
-		t.Fatalf("index page storage label is stale; body: %s", body)
+	// The masthead names the product, not the storage backend behind it.
+	if body := page.Body.String(); strings.Contains(body, "POSTGRES-BACKED") || strings.Contains(body, "MARKDOWN-BACKED") {
+		t.Fatalf("index page masthead still advertises a storage backend; body: %s", body)
 	}
 }
 
