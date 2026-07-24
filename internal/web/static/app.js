@@ -139,6 +139,15 @@
     return fresh;
   }
 
+  function replaceDetail(detail, html) {
+    const holder = document.createElement('div');
+    holder.innerHTML = (html || '').trim();
+    const fresh = holder.firstElementChild;
+    if (!fresh) return detail;
+    detail.replaceWith(fresh);
+    return fresh;
+  }
+
   async function commitMove(card, from) {
     const id = card.dataset.taskId;
     const list = card.parentElement;
@@ -422,8 +431,112 @@
     });
   }
 
+  /* --------------------------------------------------------------- edits - */
+
+  function beginEdit(field) {
+    if (!field || field.classList.contains('editing')) return;
+    const display = field.querySelector('[data-edit-display]');
+    const form = field.querySelector('.inline-edit');
+    const control = form && form.elements.value;
+    if (!display || !form || !control) return;
+    field.classList.add('editing');
+    display.hidden = true;
+    form.hidden = false;
+    control.focus();
+    if (control instanceof HTMLInputElement) control.select();
+    else control.setSelectionRange(control.value.length, control.value.length);
+  }
+
+  function cancelEdit(field) {
+    if (!field) return;
+    const display = field.querySelector('[data-edit-display]');
+    const form = field.querySelector('.inline-edit');
+    if (!display || !form) return;
+    field.classList.remove('editing');
+    form.hidden = true;
+    display.hidden = false;
+    display.focus();
+  }
+
+  document.addEventListener('dblclick', (event) => {
+    const display = event.target.closest('[data-edit-display]');
+    if (!display) return;
+    event.preventDefault();
+    beginEdit(display.closest('[data-edit-field]'));
+  });
+
+  document.addEventListener('click', (event) => {
+    const cancel = event.target.closest('[data-edit-cancel]');
+    if (!cancel) return;
+    cancelEdit(cancel.closest('[data-edit-field]'));
+  });
+
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && drawer && !drawer.hidden) {
+    const display = event.target.closest('[data-edit-display]');
+    if (display && event.target === display && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      beginEdit(display.closest('[data-edit-field]'));
+      return;
+    }
+
+    const form = event.target.closest('.inline-edit');
+    if (!form) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelEdit(form.closest('[data-edit-field]'));
+      return;
+    }
+    const field = form.closest('[data-edit-field]');
+    const saveTitle = field && field.dataset.editField === 'title' && event.key === 'Enter';
+    const saveDescription = field && field.dataset.editField === 'description' &&
+      event.key === 'Enter' && (event.metaKey || event.ctrlKey);
+    if (saveTitle || saveDescription) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  document.addEventListener('submit', async (event) => {
+    const form = event.target.closest('.inline-edit');
+    if (!form) return;
+    event.preventDefault();
+    const detail = form.closest('.task-detail');
+    const fieldName = form.elements.field.value;
+    const submit = form.querySelector('[type="submit"]');
+    form.setAttribute('aria-busy', 'true');
+    if (submit) submit.disabled = true;
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams(new FormData(form)),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Could not save that edit.');
+
+      const card = findCard(payload.id);
+      if (card) swap(card, payload.card).classList.add('settled');
+      const freshDetail = replaceDetail(detail, payload.detail);
+      const freshDisplay = freshDetail.querySelector(
+        `[data-edit-field="${CSS.escape(fieldName)}"] [data-edit-display]`,
+      );
+      if (freshDisplay) freshDisplay.focus();
+      if (!board) document.title = `${payload.title} · Tasks`;
+      refresh();
+      toast(payload.message);
+    } catch (error) {
+      toast(error.message, { tone: 'error' });
+    } finally {
+      form.removeAttribute('aria-busy');
+      if (submit) submit.disabled = false;
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (!event.defaultPrevented && event.key === 'Escape' && drawer && !drawer.hidden) {
       event.preventDefault();
       closeDrawer();
     }

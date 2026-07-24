@@ -179,6 +179,16 @@ type moveResult struct {
 	Message     string `json:"message"`
 }
 
+// editResult refreshes both places edited text can be visible: the board card
+// and the open task detail.
+type editResult struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Card    string `json:"card"`
+	Detail  string `json:"detail"`
+	Message string `json:"message"`
+}
+
 func New(config Config) http.Handler {
 	if config.Now == nil {
 		config.Now = time.Now
@@ -206,6 +216,7 @@ func New(config Config) http.Handler {
 	h.mux.Handle("GET /{$}", h.requireSession(http.HandlerFunc(h.index)))
 	h.mux.Handle("POST /logout", h.requireSession(http.HandlerFunc(h.logout)))
 	h.mux.Handle("POST /tasks", h.requireSession(http.HandlerFunc(h.createTask)))
+	h.mux.Handle("POST /tasks/{id}/edit", h.requireSession(http.HandlerFunc(h.editTask)))
 	h.mux.Handle("POST /tasks/{id}/move", h.requireSession(http.HandlerFunc(h.moveTask)))
 	h.mux.Handle("POST /tasks/{id}/attachments", h.requireSession(http.HandlerFunc(h.uploadAttachment)))
 	h.mux.Handle("GET /attachments/{key...}", h.requireSession(http.HandlerFunc(h.attachment)))
@@ -361,6 +372,84 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectWithMessage(w, r, "Created "+created.ID)
+}
+
+// editTask replaces one text field from the inline detail editor. The task
+// version rendered with the form prevents a stale open drawer from overwriting
+// a newer edit.
+func (h *handler) editTask(w http.ResponseWriter, r *http.Request) {
+	if !h.validCSRF(r) {
+		h.editFailed(w, r, http.StatusForbidden, "invalid CSRF token")
+		return
+	}
+	version, err := strconv.ParseInt(strings.TrimSpace(r.PostForm.Get("expected_version")), 10, 64)
+	if err != nil || version < 1 {
+		h.editFailed(w, r, http.StatusBadRequest, "expected version must be a positive whole number")
+		return
+	}
+
+	value := r.PostForm.Get("value")
+	input := task.EditInput{ExpectedVersion: &version}
+	message := ""
+	switch strings.TrimSpace(r.PostForm.Get("field")) {
+	case string(task.TextFieldTitle):
+		input.Title = &value
+		message = "Updated title"
+	case string(task.TextFieldDescription):
+		input.Description = &value
+		message = "Updated description"
+	default:
+		h.editFailed(w, r, http.StatusBadRequest, "field must be title or description")
+		return
+	}
+
+	edited, err := h.tasks.Edit(webMutationContext(r.Context()), r.PathValue("id"), input)
+	if err != nil {
+		code := http.StatusBadRequest
+		switch {
+		case errors.Is(err, task.ErrConflict):
+			code = http.StatusConflict
+		case errors.Is(err, task.ErrNotFound):
+			code = http.StatusNotFound
+		}
+		h.editFailed(w, r, code, err.Error())
+		return
+	}
+	if !wantsJSON(r) {
+		http.Redirect(w, r, "/"+url.PathEscape(edited.ID)+"?message="+url.QueryEscape(message), http.StatusSeeOther)
+		return
+	}
+	h.writeEdit(w, r, edited, message)
+}
+
+func (h *handler) writeEdit(w http.ResponseWriter, r *http.Request, item task.Task, message string) {
+	current := r.Context().Value(sessionContextKey{}).(session)
+	card := h.newTaskCard(item, current.CSRF, h.storedTask(r.Context()))
+	var cardHTML bytes.Buffer
+	if err := h.templates.ExecuteTemplate(&cardHTML, "task-card", card); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render card"})
+		return
+	}
+	var detailHTML bytes.Buffer
+	if err := h.templates.ExecuteTemplate(&detailHTML, "task-detail", card); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render task detail"})
+		return
+	}
+	writeJSON(w, http.StatusOK, editResult{
+		ID:      item.ID,
+		Title:   item.Title,
+		Card:    cardHTML.String(),
+		Detail:  detailHTML.String(),
+		Message: message,
+	})
+}
+
+func (h *handler) editFailed(w http.ResponseWriter, r *http.Request, code int, message string) {
+	if wantsJSON(r) {
+		writeJSON(w, code, map[string]string{"error": message})
+		return
+	}
+	http.Error(w, message, code)
 }
 
 // moveTask drops a task into a column at a position. Drag and drop calls it

@@ -73,6 +73,7 @@ The homepage is a three-column board of **To do**, **In progress**, and **Done**
 
 - Drag a card to another column to change its status, or within a column to set its order by hand. Both are saved immediately, and a card dropped into **Done** ahead of its dependencies snaps back with the reason.
 - Cards are previews: title, a plain-text slice of the description, dependency and file counts, and a cover thumbnail of the first image. Click one for the full task in a slide-over panel; the URL follows, so the panel is shareable and the back button closes it.
+- In task detail, double-click the title or description to edit it in place. Press `Enter` to save a title, `⌘`/`Ctrl` + `Enter` to save a description, or `Escape` to cancel.
 - Every drag has a pointer-free equivalent. The `⋯` menu on each card moves it between columns, and focusing a card and holding `⌘`/`Ctrl` with the arrow keys moves it left, right, up, or down.
 - Without JavaScript the same board renders, the `⋯` menu posts an ordinary form, and cards open a full detail page. File attachments live on that detail view, images previewed inline and everything else as a download.
 

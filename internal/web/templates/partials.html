@@ -39,8 +39,21 @@
 {{define "task-detail"}}<article class="task-detail" data-task-id="{{.ID}}" data-status="{{.Status}}">
   <header class="detail-head">
     <span class="status-pill">{{.StatusLabel}}</span>
-    <h2>{{.Title}}</h2>
-    <p class="detail-stamp"><code class="task-id">{{.ID}}</code><time datetime="{{.Timestamp}}">updated {{.Relative}}</time></p>
+    <div class="editable-field editable-title" data-edit-field="title">
+      <h2 class="editable-display" data-edit-display tabindex="0" title="Double-click to edit">{{.Title}}</h2>
+      <form class="inline-edit" method="post" action="/tasks/{{.ID}}/edit" hidden>
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <input type="hidden" name="field" value="title">
+        <input type="hidden" name="expected_version" value="{{.Version}}">
+        <label class="visually-hidden" for="title-{{.ID}}">Task title</label>
+        <input id="title-{{.ID}}" name="value" value="{{.Title}}" autocomplete="off" required>
+        <div class="inline-actions">
+          <button class="small" type="submit">Save</button>
+          <button class="quiet small" type="button" data-edit-cancel>Cancel</button>
+        </div>
+      </form>
+    </div>
+    <p class="detail-stamp"><code class="task-id">{{.ID}}</code><time datetime="{{.Timestamp}}">updated {{.Relative}}</time><span>Double-click title or description to edit</span></p>
   </header>
 
   <form class="detail-moves" method="post" action="/tasks/{{.ID}}/move">
@@ -49,8 +62,24 @@
     {{range .Moves}}<button class="ghost" type="submit" name="status" value="{{.Status}}">{{.Label}}</button>{{end}}
   </form>
 
-  {{if .Description}}<div class="description">{{renderMarkdown .Description}}</div>
-  {{else}}<p class="detail-empty">No description yet.</p>{{end}}
+  <div class="editable-field editable-description" data-edit-field="description">
+    <div class="editable-display" data-edit-display tabindex="0" title="Double-click to edit">
+      {{if .Description}}<div class="description">{{renderMarkdown .Description}}</div>
+      {{else}}<p class="detail-empty">No description yet.</p>{{end}}
+    </div>
+    <form class="inline-edit" method="post" action="/tasks/{{.ID}}/edit" hidden>
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="field" value="description">
+      <input type="hidden" name="expected_version" value="{{.Version}}">
+      <label class="field-label" for="description-{{.ID}}">Description <span>Markdown</span></label>
+      <textarea id="description-{{.ID}}" name="value" rows="12">{{.Description}}</textarea>
+      <div class="inline-actions">
+        <button class="small" type="submit">Save</button>
+        <button class="quiet small" type="button" data-edit-cancel>Cancel</button>
+        <span class="edit-shortcut">⌘/Ctrl + Enter</span>
+      </div>
+    </form>
+  </div>
 
   {{with .DependsOn}}<section class="detail-block">
     <h3>Depends on</h3>

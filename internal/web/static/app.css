@@ -71,6 +71,7 @@ body {
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 h1, h2, h3, p { margin-top: 0; }
 h1, h2, h3 { font-family: var(--display); font-weight: 600; }
@@ -529,6 +530,64 @@ kbd {
   font-size: .7rem;
 }
 .detail-stamp .task-id { max-width: none; }
+
+.editable-display {
+  border-radius: .3rem;
+  cursor: text;
+  transition: background .15s ease, box-shadow .15s ease;
+}
+.editable-display:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  box-shadow: 0 0 0 .3rem color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.editable-title .editable-display { width: fit-content; }
+.editable-title .inline-edit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: .55rem;
+  align-items: center;
+  margin: .5rem 0 .4rem;
+}
+.editable-title .inline-actions { flex-wrap: nowrap; }
+.editable-title input[name="value"] {
+  font-family: var(--display);
+  font-size: clamp(1.4rem, 3vw, 1.9rem);
+  font-weight: 600;
+  line-height: 1.15;
+}
+.editable-description > .editable-display {
+  min-height: 2rem;
+  margin-top: .55rem;
+  padding: .35rem 0;
+}
+.editable-description .inline-edit {
+  display: grid;
+  gap: .45rem;
+  margin-top: 1rem;
+}
+.editable-description textarea {
+  min-height: 12rem;
+  font-family: var(--mono);
+  font-size: .82rem;
+  line-height: 1.5;
+}
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  align-items: center;
+}
+.inline-edit[aria-busy="true"] { opacity: .65; }
+.edit-shortcut {
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: .64rem;
+}
+.editable-description .field-label span {
+  color: var(--ink-faint);
+  letter-spacing: .04em;
+  text-transform: none;
+}
 
 .detail-moves {
   display: flex;

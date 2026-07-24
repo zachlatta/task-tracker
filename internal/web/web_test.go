@@ -498,6 +498,146 @@ func TestTaskDetailServesADrawerFragment(t *testing.T) {
 	if !strings.Contains(body, `enctype="multipart/form-data"`) {
 		t.Fatalf("fragment does not offer image upload; body: %s", body)
 	}
+	for _, want := range []string{
+		`data-edit-field="title"`,
+		`data-edit-field="description"`,
+		`action="/tasks/detail-me/edit"`,
+		`name="expected_version" value="1"`,
+		`title="Double-click to edit"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fragment does not offer inline editing %q; body: %s", want, body)
+		}
+	}
+}
+
+func TestEditTaskTitleAndDescription(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "edit-me")
+	if _, err := service.Create(context.Background(), task.CreateInput{
+		Title: "Draft title", Description: "Draft **description**.",
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cookie, csrf := login(t, handler)
+
+	edit := func(field, value, version string) struct {
+		ID     string `json:"id"`
+		Title  string `json:"title"`
+		Card   string `json:"card"`
+		Detail string `json:"detail"`
+	} {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/tasks/edit-me/edit", strings.NewReader(url.Values{
+			"csrf":             {csrf},
+			"field":            {field},
+			"value":            {value},
+			"expected_version": {version},
+		}.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Accept", "application/json")
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("edit %s status = %d; body: %s", field, response.Code, response.Body.String())
+		}
+		var payload struct {
+			ID     string `json:"id"`
+			Title  string `json:"title"`
+			Card   string `json:"card"`
+			Detail string `json:"detail"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode %s edit response: %v; body: %s", field, err, response.Body.String())
+		}
+		return payload
+	}
+
+	titleResult := edit("title", "  Revised title  ", "1")
+	if titleResult.ID != "edit-me" || titleResult.Title != "Revised title" {
+		t.Fatalf("title edit payload = %#v", titleResult)
+	}
+	if !strings.Contains(titleResult.Card, "Revised title") ||
+		!strings.Contains(titleResult.Detail, "Revised title") ||
+		!strings.Contains(titleResult.Detail, `name="expected_version" value="2"`) {
+		t.Fatalf("title edit did not return refreshed markup: %#v", titleResult)
+	}
+
+	descriptionResult := edit("description", "Revised **description**.", "2")
+	if !strings.Contains(descriptionResult.Card, "Revised description.") ||
+		!strings.Contains(descriptionResult.Detail, "<strong>description</strong>") ||
+		!strings.Contains(descriptionResult.Detail, `name="expected_version" value="3"`) {
+		t.Fatalf("description edit did not return refreshed markup: %#v", descriptionResult)
+	}
+	edited, err := service.Get(context.Background(), "edit-me")
+	if err != nil {
+		t.Fatalf("get edited task: %v", err)
+	}
+	if edited.Title != "Revised title" || edited.Description != "Revised **description**." || edited.Version != 3 {
+		t.Fatalf("edited task = %#v", edited)
+	}
+}
+
+func TestEditTaskRejectsInvalidRequests(t *testing.T) {
+	t.Parallel()
+
+	handler, service := testHandlerWithIDs(t, "edit-me")
+	if _, err := service.Create(context.Background(), task.CreateInput{
+		Title: "Keep title", Description: "Keep description",
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cookie, csrf := login(t, handler)
+
+	for name, expectation := range map[string]struct {
+		values url.Values
+		status int
+	}{
+		"missing csrf": {
+			url.Values{"field": {"title"}, "value": {"Changed"}, "expected_version": {"1"}},
+			http.StatusForbidden,
+		},
+		"unknown field": {
+			url.Values{"csrf": {csrf}, "field": {"status"}, "value": {"done"}, "expected_version": {"1"}},
+			http.StatusBadRequest,
+		},
+		"invalid version": {
+			url.Values{"csrf": {csrf}, "field": {"title"}, "value": {"Changed"}, "expected_version": {"nope"}},
+			http.StatusBadRequest,
+		},
+		"stale version": {
+			url.Values{"csrf": {csrf}, "field": {"description"}, "value": {"Changed"}, "expected_version": {"2"}},
+			http.StatusConflict,
+		},
+		"blank title": {
+			url.Values{"csrf": {csrf}, "field": {"title"}, "value": {"   "}, "expected_version": {"1"}},
+			http.StatusBadRequest,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/tasks/edit-me/edit", strings.NewReader(expectation.values.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Accept", "application/json")
+			request.AddCookie(cookie)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != expectation.status {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, expectation.status, response.Body.String())
+			}
+			if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+				t.Fatalf("content type = %q, want JSON", contentType)
+			}
+		})
+	}
+	unchanged, err := service.Get(context.Background(), "edit-me")
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if unchanged.Title != "Keep title" || unchanged.Description != "Keep description" || unchanged.Version != 1 {
+		t.Fatalf("rejected edit changed task: %#v", unchanged)
+	}
 }
 
 func TestBoardScriptAndStylesAreServed(t *testing.T) {
@@ -728,6 +868,12 @@ func TestTaskMutationsCarryWebAuditAttribution(t *testing.T) {
 	if start.Code != http.StatusSeeOther {
 		t.Fatalf("start status = %d; body: %s", start.Code, start.Body.String())
 	}
+	edit := postForm(handler, "/tasks/web-audit/edit", url.Values{
+		"csrf": {csrf}, "field": {"title"}, "value": {"Edited web audit"}, "expected_version": {"2"},
+	}, cookie)
+	if edit.Code != http.StatusSeeOther {
+		t.Fatalf("edit status = %d; body: %s", edit.Code, edit.Body.String())
+	}
 	var uploadBody bytes.Buffer
 	writer := multipart.NewWriter(&uploadBody)
 	if err := writer.WriteField("csrf", csrf); err != nil {
@@ -758,10 +904,10 @@ func TestTaskMutationsCarryWebAuditAttribution(t *testing.T) {
 		t.Fatalf("complete status = %d; body: %s", complete.Code, complete.Body.String())
 	}
 
-	if len(repository.mutations) != 4 {
+	if len(repository.mutations) != 5 {
 		t.Fatalf("captured mutations = %#v", repository.mutations)
 	}
-	wantActions := []string{"create", "start", "add_attachment", "complete"}
+	wantActions := []string{"create", "start", "edit", "add_attachment", "complete"}
 	for index, mutation := range repository.mutations {
 		if mutation.Action != wantActions[index] || mutation.ActorKind != "shared_secret" || mutation.Source != "web" {
 			t.Fatalf("mutation %d attribution = %#v", index, mutation)
